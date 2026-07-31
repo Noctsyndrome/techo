@@ -2,7 +2,7 @@
 name = "techo"
 version = "0.1.0-alpha.1"
 edition = "2024"
-description = "A paper planner-inspired terminal user interface."
+description = "techō (手帳, てちょう) is a TUI application inspired by the experience of keeping a paper planner."
 license = "MIT"
 repository = "https://github.com/Noctsyndrome/techo"
 homepage = "https://github.com/Noctsyndrome/techo"
