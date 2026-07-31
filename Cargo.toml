@@ -2,6 +2,13 @@
 name = "techo"
 version = "0.1.0"
 edition = "2024"
+description = "A paper planner-inspired terminal user interface."
+license = "MIT"
+repository = "https://github.com/Noctsyndrome/techo"
+homepage = "https://github.com/Noctsyndrome/techo"
+readme = "README.md"
+keywords = ["tui", "terminal", "planner", "journal"]
+categories = ["command-line-utilities"]
 
 [dependencies]
 chrono = "0.4"
