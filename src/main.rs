@@ -658,7 +658,7 @@ fn ui(frame: &mut Frame, app: &App) {
         ),
         Style::default().add_modifier(Modifier::BOLD),
     )))
-    .block(Block::default().borders(Borders::ALL).title("techo"));
+    .block(Block::default().borders(Borders::ALL).title("techō"));
     frame.render_widget(header, chunks[0]);
 
     let page = Layout::horizontal([Constraint::Percentage(68), Constraint::Percentage(32)])
