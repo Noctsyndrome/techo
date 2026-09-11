@@ -149,8 +149,19 @@ class Session:
         try:
             code = self.process.wait(timeout=5)
         except subprocess.TimeoutExpired:
+            # Tell a lost keystroke from a hung process before giving up.
+            state = subprocess.run(["ps", "-o", "pid,stat,command", "-p", str(self.process.pid)],
+                                   capture_output=True, text=True).stdout
             self.pump(0.3)
-            raise AssertionError(f"techo did not quit on q; screen was:\n{self.screen.text}") from None
+            screen = self.screen.text
+            os.write(self.master, b"q")
+            try:
+                self.process.wait(timeout=3)
+                outcome = "it quit on a second q"
+            except subprocess.TimeoutExpired:
+                outcome = "it is still running after a second q"
+            raise AssertionError(
+                f"techo did not quit on q; {outcome}.\nprocess:\n{state}\nscreen was:\n{screen}") from None
         assert code == 0, f"techo exited with {code}"
         restored = termios.tcgetattr(self.slave)
         mask = termios.ICANON | termios.ECHO | termios.ISIG
