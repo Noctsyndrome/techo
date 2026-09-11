@@ -853,26 +853,26 @@ fn draw_text(frame: &mut Frame, edit: &crate::app::Editing, body: Rect) {
 
 fn draw_help(frame: &mut Frame, app: &mut App) {
     app.hits.clear();
-    let area = popup(frame.area(), 78, 20);
+    // Wide enough that no line wraps at 120 columns, tall enough for all of them.
+    let area = popup(frame.area(), 84, 22);
     frame.render_widget(Clear, area);
     let month = theme::month(app.date);
     let text = format!(
         "s schedule   t todo   f free memo   Tab switch   or click a panel\n\
          Up/Down move   Enter write or edit   n new   d delete   Space check a todo\n\
          Down past the last item starts a new one, at the time now on today's page.\n\
-         schedule: n writes an item; its time is the note's title, Tab to change it.\n\
-         Type 9, 930 or 09:30. Items at the same time gather together.\n\
-         The paper day runs 04:00 to 03:59, so 00:00-03:59 belongs to the night after.\n\
+         schedule: an item's time is the note's title; Tab changes it. 9, 930 or 09:30.\n\
+         Items at the same time gather together. The paper day runs 04:00 to 03:59.\n\
          \n\
          [ ] previous / next day   Home today   g go to a date   y the year\n\
          year: arrows move, Enter opens, [ ] change year, PgUp/PgDn page, Esc back\n\
          \n\
-         editor: Ctrl+S or Ctrl+Enter saves, Esc cancels, Enter adds a line, paste works.\n\
-         moon: an approximate phase for the date; the date's day number is day N.\n\
-         this month is {} ({}), and its pages are printed in {}.\n\
+         editor: Ctrl+S or Ctrl+Enter saves, Esc cancels, Enter adds a line.\n\
+         moon: an approximate phase for the date. day N counts the days of the year.\n\
+         this month is {} ({}), printed in {}.\n\
          \n\
          files: {}\n\
-         words: words.txt beside the journals, one line per day, if you want your own.\n\
+         words: words.txt beside the journals, one line per day, replaces the built-in.\n\
          \n\
          ? or F1 shows this again. Any key closes it.",
         month.name,
@@ -1058,6 +1058,20 @@ mod tests {
         assert_eq!(app.date, parse_date("2024-02-29").unwrap());
         assert!(app.calendar.is_none());
         assert!(!app.store.path(app.date).exists());
+        let dir = app.store.dir.clone();
+        drop(app);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn help_shows_every_line_including_the_last() {
+        let mut app = app();
+        app.help = true;
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let text = screen(&terminal);
+        assert!(text.contains("s schedule   t todo"));
+        assert!(text.contains("Any key closes it."));
         let dir = app.store.dir.clone();
         drop(app);
         std::fs::remove_dir_all(dir).unwrap();

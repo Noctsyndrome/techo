@@ -66,7 +66,7 @@ cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 cargo build --locked
-python3 scripts/terminal_smoke.py target/debug/techo  # Linux PTY acceptance
+python3 scripts/terminal_smoke.py target/debug/techo  # Linux/macOS PTY acceptance
 ```
 
 Windows checks: `./dev.ps1 test` and `./dev.ps1 -CargoArgs @('clippy', '--locked', '--all-targets', '-D', 'warnings')`. `./scripts/dev-window.ps1` rebuilds and reopens techo in a fresh Windows Terminal window, closing the previous one first, for quick rounds of hands-on testing.

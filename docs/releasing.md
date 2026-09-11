@@ -44,8 +44,8 @@ Review `cargo package --list` before the dry run so no unintended file is
 included. The dry run builds the packaged crate in an isolated directory.
 
 Run the manual GitHub Actions workflow as a final cross-platform check. It
-runs the verification suite on Windows and Linux, including the Linux PTY
-smoke test. Wait for a successful result before publishing.
+runs the verification suite on Linux, macOS and Windows, including the PTY
+smoke test on Linux and macOS. Wait for a successful result before publishing.
 
 ## Publish
 

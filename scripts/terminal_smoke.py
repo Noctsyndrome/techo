@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Linux PTY acceptance against the real executable; no third-party packages.
+"""Linux/macOS PTY acceptance against the real executable; no third-party packages.
 
 Exercises terminal event decoding, mouse capture, paste, saving, reopening,
 calendar navigation, and resize recovery with disposable journal files.
@@ -109,8 +109,9 @@ class Session:
                                         env=env, preexec_fn=setup)
         self.pump(0.8)
         # An empty journal directory opens on the key reference; any key closes it.
-        if "Any key closes" in self.screen.text:
+        if "s schedule   t todo" in self.screen.text:
             self.send("\x1b")
+            assert "s schedule   t todo" not in self.screen.text, self.screen.text
         self.expect("free memo")
 
     def pump(self, duration=0.2):
@@ -212,9 +213,10 @@ def main():
             snapshot(session, "calendar-small")
             session.click("31")
             session.expect("01-31 (水)")
-            session.expect("2024-01")
             session.resize(80, 1)
             session.resize(120, 40)
+            # The month calendar, with the year in its title, is back on the wide page.
+            session.expect("2024-01")
             session.send("g")
             session.send("2027-02-01\r")
             session.send("fe")

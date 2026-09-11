@@ -1,12 +1,14 @@
 name: Rust
 # Manual only while the project is early; run it from the Actions tab when a
-# Linux check (build, tests, PTY smoke) is wanted before a release.
+# cross-platform check (build, tests, PTY smoke on Linux and macOS) is wanted
+# before a release.
 on: workflow_dispatch
 jobs:
   check:
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -17,5 +19,5 @@ jobs:
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
       - run: cargo build --locked
-      - if: runner.os == 'Linux'
+      - if: runner.os != 'Windows'
         run: python3 scripts/terminal_smoke.py target/debug/techo

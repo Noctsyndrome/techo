@@ -46,4 +46,4 @@
 - `./dev.ps1 -CargoArgs @('fmt','--check')`、`./dev.ps1 -CargoArgs @('clippy','--locked','--all-targets','-D','warnings')`、`./dev.ps1 test --locked`：32 项测试通过，1 项预览导出默认忽略。
 - 预览：设置 `TECHO_PREVIEW_DIR` 后 `./dev.ps1 -CargoArgs @('test','export_previews','--','--ignored')`，检查了 120×40、80×24 的日视图、年视图和日程便签。
 - 新增测试覆盖：同时刻归并与多行落位、宽松时间解析、按条目移动、Down 越过末条新建、页面不含旧提示文案、标题反色标识当前面板、鼠标点条目行、已写日期打点、长日程滚动、便签落在光标行且页面保持可见、消息一秒半后淡出、首次启动 Help、非法时间拒绝保存、删除只作用于光标下条目、十二月色互不相同。
-- Linux PTY 脚本 `scripts/terminal_smoke.py` 已对齐新交互（首启关闭 Help、正文优先再 Tab 改时间、新的删除确认文案），本机为 Windows 未运行，待 CI 验证。
+- PTY 脚本 `scripts/terminal_smoke.py` 已对齐新交互（首启关闭 Help、正文优先再 Tab 改时间、新的删除确认文案）。首次在 CI 上运行时失败：Help 有几行超出弹窗宽度被折行，最后一行「Any key closes it.」被挤出框外，脚本因此没识别到首启 Help，后续的 `n` 被用来关 Help 而没有开便签。已把 Help 文案压到 78 列内、弹窗放大到 84×22，并加测试守住最后一行可见；脚本改用第一行文字识别 Help。CI 矩阵加入 macOS，PTY 冒烟在 Linux 和 macOS 上都跑，矩阵不再 fail-fast。
