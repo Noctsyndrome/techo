@@ -124,7 +124,9 @@ class Session:
 
     def send(self, value):
         os.write(self.master, value.encode() if isinstance(value, str) else value)
-        self.pump()
+        # A lone Esc followed too soon by another byte reads as Alt+key on a slow
+        # machine, so give the app time to take it on its own.
+        self.pump(0.6 if value == "\x1b" else 0.2)
         assert self.process.poll() is None, self.screen.text
 
     def paste(self, value): self.send("\x1b[200~" + value + "\x1b[201~")
@@ -144,7 +146,12 @@ class Session:
 
     def quit(self):
         os.write(self.master, b"q")
-        assert self.process.wait(timeout=5) == 0
+        try:
+            code = self.process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            self.pump(0.3)
+            raise AssertionError(f"techo did not quit on q; screen was:\n{self.screen.text}") from None
+        assert code == 0, f"techo exited with {code}"
         restored = termios.tcgetattr(self.slave)
         mask = termios.ICANON | termios.ECHO | termios.ISIG
         assert restored[3] & mask == self.before[3] & mask, "terminal mode was not restored"
@@ -152,7 +159,11 @@ class Session:
     def close(self):
         if self.process.poll() is None:
             self.process.terminate()
-            self.process.wait(timeout=5)
+            try:
+                self.process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                self.process.wait(timeout=5)
         os.close(self.master)
         os.close(self.slave)
 
