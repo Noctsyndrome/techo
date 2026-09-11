@@ -34,6 +34,28 @@ pub fn parse_time(value: &str) -> Option<u16> {
     (hour < 24 && minute < 60).then(|| (hour * 60 + minute + 1200) % 1440)
 }
 
+/// Read a time the way a person types it: "9", "09", "930", "0930", "9:30", "09:30".
+pub fn parse_time_input(value: &str) -> Option<u16> {
+    let value: String = value.chars().filter(|c| !c.is_whitespace()).collect();
+    let (hour, minute) = match value.split_once(':') {
+        Some((h, m)) => (h.to_string(), m.to_string()),
+        None => match value.len() {
+            1 | 2 => (value.clone(), "00".into()),
+            3 => (value[..1].into(), value[1..].into()),
+            4 => (value[..2].into(), value[2..].into()),
+            _ => return None,
+        },
+    };
+    if hour.is_empty() || hour.len() > 2 || minute.len() != 2 {
+        return None;
+    }
+    parse_time(&format!(
+        "{:02}:{}",
+        hour.parse::<u16>().ok().filter(|h| *h < 24)?,
+        minute
+    ))
+}
+
 pub fn clock_time(offset: u16) -> String {
     let clock = (offset + 240) % 1440;
     format!("{:02}:{:02}", clock / 60, clock % 60)
@@ -289,6 +311,28 @@ mod tests {
         assert_eq!(j.tasks[0].text, "first\nsecond");
         assert_eq!(j.schedule[0].offset_minutes, 300);
         assert_eq!(j.free_memo, "notes\n## TODO\nmore");
+    }
+    #[test]
+    fn typed_times_are_read_leniently() {
+        for (typed, clock) in [
+            ("9", "09:00"),
+            ("09", "09:00"),
+            ("930", "09:30"),
+            ("0930", "09:30"),
+            ("9:30", "09:30"),
+            (" 21:05 ", "21:05"),
+            ("2130", "21:30"),
+            ("0", "00:00"),
+        ] {
+            assert_eq!(
+                parse_time_input(typed).map(clock_time),
+                Some(clock.into()),
+                "{typed}"
+            );
+        }
+        for invalid in ["", "25", "960", "12:60", "1:5", "12345", "ab", "9:"] {
+            assert_eq!(parse_time_input(invalid), None, "{invalid}");
+        }
     }
     #[test]
     fn strict_times_and_paper_day() {

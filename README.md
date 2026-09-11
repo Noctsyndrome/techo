@@ -15,39 +15,37 @@ cargo install --path . --locked
 techo
 ```
 
-Use an interactive UTF-8 terminal. Mouse input is optional; every primary operation works with the keyboard. On SSH, mouse support depends on the local terminal forwarding mouse events. `techo --no-mouse` leaves mouse selection to the terminal. When mouse capture is enabled, Shift+drag commonly selects terminal text.
+Use an interactive UTF-8 terminal. Mouse input is optional; every operation works with the keyboard. On SSH, mouse support depends on the local terminal forwarding mouse events. `techo --no-mouse` leaves mouse selection to the terminal. When mouse capture is enabled, Shift+drag commonly selects terminal text.
 
-On Windows with Visual C++ Build Tools, run `./dev.ps1` from PowerShell. This development helper opens the checkout's existing `logs` directory. Use a standalone terminal window for interactive testing.
+On Windows with Visual C++ Build Tools, run `./dev.ps1` from PowerShell. This development helper opens the checkout's `logs` directory. Use a standalone terminal window for interactive testing.
 
 ```sh
-techo --data-dir ./logs        # existing alpha.1 checkout journals
+techo --data-dir ./logs        # checkout journals
 techo --date 2027-02-01        # open a specific date
 techo --help
 ```
 
-## Your day
+## The page
 
-Free memo is selected when techo opens: press Enter and start writing.
+A day is one page. On the left: the date, a ruled schedule with hour marks down its gutter, and free memo. On the right: todo, the month, and a line of words for the day. Panels are ruled boxes; the active one shows its title as a small tab in the month's colour. When a panel holds more than it shows, a small `⋯` sits on its bottom rule, and on its top rule once you have scrolled past the start. The first launch shows the key reference once; `?` brings it back.
 
-- **Schedule:** press `s`, then `n`; enter `HH:MM`, press Tab, and write the item. Ctrl+S saves. Entries are sorted by time and only existing entries occupy space. Enter edits the selected entry, including its time. A `↵` preview marker means there is more than one line; the editor shows the full text.
-- **Todo:** press `t`, then `n` to add; Space checks an item, Enter edits it, and `d` opens a deletion confirmation.
-- **Free memo:** press `f`, then Enter to write. This has most of the page's writing space. Up/Down or the wheel scrolls the saved memo.
+**Schedule.** Items in time order, each with its time in the gutter; items at the same time gather under one label. `n` opens a small note on the page with the time as its title: on today's page it starts at the current time, next to an existing item it takes that item's time. Write, then Tab into the title if the time needs changing; `9`, `930` and `09:30` are all read. Enter on an item edits it, `d` removes it, Up/Down move by item. Down past the last item starts a new one, at the time now on today's page; the same works in todo. The paper day runs from 04:00 to 03:59.
 
-Click a panel, including its border or empty area, to select it. Click a list row to select an entry. The active panel has a **`>` title marker and thick border**, so it stays recognizable without color. Tab/Shift+Tab also switches panels. Small terminals display the active panel alone when necessary.
+**Todo.** `n` adds, Space checks, Enter edits, `d` removes. The note opens on the todo row.
 
-In the editor, **Ctrl+S saves and Esc cancels**. Enter inserts a new line. Arrow keys, Home/End, Delete and Backspace move and edit the text; Ctrl+Home/End jumps to the beginning/end. Multiline paste is supported. Text scrolls to keep the cursor visible. For schedule entries, Tab switches between time and item fields. Buttons can also be clicked.
+**Free memo.** Enter writes in place. Up/Down or the wheel scrolls.
 
-The paper day keeps the original **04:00–03:59** convention. A time such as `00:30 (+1)` belongs to the following morning of the opened journal date. Multiple items at the same time are allowed.
+`s`, `t`, `f` or Tab move between panels; clicking a panel, a line, or a day works as well. Writing never leaves the page: Ctrl+S or Ctrl+Enter saves and Esc cancels, Enter adds a line, paste is supported. The footer keeps one muted line of the keys that matter for the focused panel or the open note; a message such as "Saved" takes its place for a moment and then the hints return.
 
-## Dates and calendar
+## Dates
 
-Press `y`, or click the month-view title, to open the year calendar. Click a date to open it, or use arrows and Enter. `[` / `]` changes the year; PageUp/PageDown or the wheel moves between calendar pages. All twelve months appear together when there is enough space; smaller terminals paginate them. `t` selects today in the calendar; Esc returns without changing the open journal.
+`[` and `]` turn the page a day; Home opens today; `g` goes to a `YYYY-MM-DD` date. `y`, or clicking the month, opens the year: arrows move, Enter opens a day, `[` / `]` change the year, PgUp/PgDn page through months on small terminals, `t` selects today, Esc returns. Days that already have a journal carry a small dot after their number.
 
-Press `g` to jump directly to a `YYYY-MM-DD` date. On the day page, `[` / `]` changes the day and Home opens today. The calendar distinguishes the selected date `[dd]`, today `(dd)`, and the open journal date `{dd}`; selected takes precedence when these coincide.
+Each month's pages are printed in their own colour, as a planner's are: the rules, the panel titles, today's date and the month's traditional name on the calendar's title (`2026-09 · 長月` for September) all take that month's shade, twelve soft Japanese colours in all. What you write stays plain, and small print stays grey. In the year, every month wears its own colour like the tabs along a planner's edge.
 
-The date header includes an **approximate moon phase**, calculated offline for the selected date at 12:00 UTC. It uses a mean 29.530588-day cycle anchored to the 2000-01-06 18:14 UTC new moon in [NASA's phase tables](https://eclipse.gsfc.nasa.gov/phase/phases1901.html). It is a daily journal detail, not a precise astronomical event time; actual phases and local-day boundaries can differ.
+The header line reads `09-11 (金) · day 254 · New moon`: the month and day as a planner prints them, the weekday, the day of the year, and an approximate moon phase in words. The phase is calculated offline for the date at 12:00 UTC from a mean 29.530588-day cycle anchored to the 2000-01-06 18:14 UTC new moon in [NASA's phase tables](https://eclipse.gsfc.nasa.gov/phase/phases1901.html). It is a daily detail, not an astronomical event time.
 
-Press `?` for help and `q` to quit outside the editor. Resizing below 32 columns × 14 rows displays a resize message while retaining the draft.
+The words rotate daily from a small built-in list of public-domain lines. A `words.txt` in the journal directory, one line per entry, replaces it.
 
 ## Files and safe saving
 
@@ -57,9 +55,9 @@ The data directory is independent of the current working directory:
 2. `TECHO_DIR`
 3. Linux: `$XDG_DATA_HOME/techo/journals`, otherwise `~/.local/share/techo/journals`; Windows: `%LOCALAPPDATA%/techo/journals`.
 
-Each date has one `YYYY-MM-DD.md` file. Browsing an empty date does not create it; saving does. A directory lock prevents two new techo instances editing the same journal directory. Saves write and sync a temporary file before replacing the journal. Save errors keep the editor and draft open. If the file has changed externally, techo refuses to overwrite it; preserve the draft before reopening.
+Each date has one `YYYY-MM-DD.md` file. Browsing a date does not create it; saving does. A directory lock prevents two techo instances editing the same journal directory. Saves write and sync a temporary file before replacing the journal. Save errors keep the editor and draft open. If the file has changed externally, techo refuses to overwrite it; preserve the draft before reopening.
 
-Existing alpha.1 journals are readable. On their first save, their exact previous contents are retained in `YYYY-MM-DD.md.alpha.bak`. The new Markdown format records `techo-format: 2` in frontmatter: multiline todo continuations are indented by two spaces; schedule body lines by four spaces; Free Memo is the final section and permits arbitrary headings and blank lines. Do not edit the same journal concurrently in another application. Alpha.1 should not be used to edit files saved in the new format.
+Alpha.1 journals are readable. On their first save, their exact previous contents are retained in `YYYY-MM-DD.md.alpha.bak`. The Markdown format records `techo-format: 2` in frontmatter: multiline todo continuations are indented by two spaces; schedule body lines by four spaces; Free Memo is the final section and permits arbitrary headings and blank lines. Do not edit the same journal concurrently in another application.
 
 ## Development
 
@@ -71,6 +69,6 @@ cargo build --locked
 python3 scripts/terminal_smoke.py target/debug/techo  # Linux PTY acceptance
 ```
 
-Windows checks: `./dev.ps1 test` and `./dev.ps1 -CargoArgs @('clippy', '--locked', '--all-targets', '-D', 'warnings')`.
+Windows checks: `./dev.ps1 test` and `./dev.ps1 -CargoArgs @('clippy', '--locked', '--all-targets', '-D', 'warnings')`. `./scripts/dev-window.ps1` rebuilds and reopens techo in a fresh Windows Terminal window, closing the previous one first, for quick rounds of hands-on testing.
 
-The [interaction feedback](docs/interaction-feedback.md) records the requested changes. [Implementation notes](docs/interaction-feedback-impl-notes.md) track decisions and validation.
+[Design review](docs/design-review.md) sets the direction: a quiet page where anything not written by you has to earn its place. The [interaction feedback](docs/interaction-feedback.md) and [implementation notes](docs/interaction-feedback-impl-notes.md) record the alpha.2 round; [design review notes](docs/design-review-impl-notes.md) record this one.

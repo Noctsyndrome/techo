@@ -2,42 +2,57 @@ use crate::{
     app::{Action, App, EditTarget, Focus},
     calendar::{MONTHS, moon},
     editor::TextEditor,
-    journal::format_time,
+    journal::clock_time,
+    schedule::{self, GUTTER},
+    theme, words,
 };
 use chrono::{Datelike, Local, NaiveDate};
 use crossterm::event::KeyCode;
 use ratatui::{
     prelude::*,
-    widgets::{Block, BorderType, Borders, Clear, Paragraph},
+    widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph, Wrap},
 };
-use unicode_width::UnicodeWidthChar;
+use std::{cell::Cell, collections::HashSet};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-fn accent() -> Style {
-    Style::default().fg(Color::Rgb(176, 192, 155))
+thread_local! {
+    /// The colour the page is printed in this month: rules, titles, today.
+    static INK: Cell<Color> = const { Cell::new(Color::DarkGray) };
+}
+fn set_ink(colour: Color) {
+    INK.with(|ink| ink.set(colour));
+}
+/// Everything the planner prints is in the month's colour; what you write is
+/// plain, and small print stays grey.
+fn ink() -> Style {
+    Style::default().fg(INK.with(|ink| ink.get()))
 }
 fn muted() -> Style {
     Style::default().fg(Color::DarkGray)
 }
-fn block(title: String, active: bool) -> Block<'static> {
-    Block::default()
+/// Panels are ruled boxes with a little margin inside. The active one shows its
+/// title as a small tab in the month's colour, which also reads without colour.
+fn block(title: &str, active: bool) -> Block<'static> {
+    let block = Block::default()
         .borders(Borders::ALL)
-        .border_type(if active {
-            BorderType::Thick
+        .padding(Padding::horizontal(1))
+        .border_type(BorderType::Plain)
+        .border_style(ink());
+    if title.is_empty() {
+        block
+    } else {
+        block.title(if active {
+            // The tab floats on the rule: a gap on either side keeps it from
+            // reading as part of the line.
+            Line::from(vec![
+                Span::raw(" "),
+                Span::styled(format!(" {title} "), ink().reversed()),
+                Span::raw(" "),
+            ])
         } else {
-            BorderType::Plain
+            Line::styled(format!(" {title} "), ink())
         })
-        .border_style(if active { accent() } else { muted() })
-        .title(Line::styled(
-            title,
-            if active {
-                accent().bold()
-            } else {
-                Style::default()
-            },
-        ))
-}
-fn panel_title(name: &str, shortcut: char, active: bool) -> String {
-    format!(" {}{} [{shortcut}] ", if active { "> " } else { "" }, name)
+    }
 }
 fn put(frame: &mut Frame, rect: Rect, text: impl Into<Text<'static>>) {
     frame.render_widget(Paragraph::new(text), rect);
@@ -45,7 +60,7 @@ fn put(frame: &mut Frame, rect: Rect, text: impl Into<Text<'static>>) {
 fn clip(text: &str, width: u16) -> String {
     let mut out = String::new();
     let mut used = 0;
-    let total = unicode_width::UnicodeWidthStr::width(text);
+    let total = text.width();
     for c in text.chars() {
         let w = c.width().unwrap_or(0);
         if used + w > width.saturating_sub(u16::from(total > width as usize)) as usize {
@@ -59,6 +74,7 @@ fn clip(text: &str, width: u16) -> String {
     }
     out
 }
+/// Quiet clickable text; returns the x after it.
 fn button(
     frame: &mut Frame,
     hits: &mut Vec<(Rect, Action)>,
@@ -68,35 +84,47 @@ fn button(
     action: Action,
     max_x: u16,
 ) -> u16 {
-    let width = (label.len() as u16).min(max_x.saturating_sub(x));
+    let width = (label.width() as u16).min(max_x.saturating_sub(x));
     if width > 0 {
         let rect = Rect::new(x, y, width, 1);
-        put(
-            frame,
-            rect,
-            Line::styled(label.to_string(), accent().bold()),
-        );
+        put(frame, rect, Line::styled(label.to_string(), muted()));
         hits.push((rect, action));
     }
-    x.saturating_add(width + 1)
+    x.saturating_add(width + 2)
 }
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     app.hits.clear();
+    set_ink(theme::month(app.date).color());
+    app.schedule_area = None;
+    app.schedule_cursor_y = None;
+    app.todo_area = None;
+    app.todo_cursor_y = None;
+    app.todo_next_y = None;
+    app.memo_area = None;
     let area = frame.area();
     if area.width < 32 || area.height < 14 {
-        put(frame, area, "techō\nPlease resize to at least 32 x 14.\nYour draft is retained.\nq: quit (outside editor)".to_string());
-        return;
-    }
-    // A clean editor backdrop also avoids partial wide glyphs at popup edges.
-    if app.editing.is_some() {
-        draw_editor(frame, app);
+        put(
+            frame,
+            area,
+            "techō\nPlease resize to at least 32 x 14.\nYour draft is retained.\nq: quit (outside editor)"
+                .to_string(),
+        );
         return;
     }
     if app.calendar.is_some() {
         draw_year(frame, app);
+    } else if app.turning() {
+        // A freshly turned page is blank for a beat before the ink appears.
+        let journal = std::mem::take(&mut app.journal);
+        draw_day(frame, app);
+        app.journal = journal;
     } else {
         draw_day(frame, app);
+    }
+    // Writing happens on the page itself, in a small note where the cursor is.
+    if app.editing.is_some() {
+        draw_editor(frame, app);
     }
     if app.help {
         draw_help(frame, app);
@@ -108,271 +136,303 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
 fn draw_day(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
-    let rows = Layout::vertical([
-        Constraint::Length(4),
-        Constraint::Min(6),
-        Constraint::Length(4),
-    ])
-    .split(area);
-    let (symbol, phase) = moon(app.date);
-    let header = block(" techō · a little space for your day ".into(), false);
-    let inner = header.inner(rows[0]);
-    frame.render_widget(header, rows[0]);
-    let weekday = ["月", "火", "水", "木", "金", "土", "日"]
-        [app.date.weekday().num_days_from_monday() as usize];
-    let date = format!(
-        " {} ({}) · day {}",
-        app.date.format("%Y 年 %m 月 %d 日"),
-        weekday,
-        app.date.ordinal()
-    );
-    put(
-        frame,
-        Rect::new(inner.x, inner.y, inner.width, 1),
-        Line::styled(date, Style::default().bold()),
-    );
-    let moon = format!(" {symbol} {phase} (approx.)");
-    put(
-        frame,
-        Rect::new(inner.x, inner.y + 1, inner.width, 1),
-        Line::styled(moon, accent()),
-    );
-    if inner.width >= 62 {
-        let x = inner.right() - 30;
-        let x = button(
+    let rows = Layout::vertical([Constraint::Min(10), Constraint::Length(1)]).split(area);
+    let body = rows[0];
+    if area.width >= 86 && body.height >= 22 {
+        // The planner page: writing on the left, todo, month and words down the right.
+        let columns = Layout::horizontal([Constraint::Min(50), Constraint::Length(34)]).split(body);
+        let left = Layout::vertical([
+            Constraint::Length(3),
+            Constraint::Length(schedule_height(
+                app,
+                columns[0].width,
+                columns[0].height - 3,
+            )),
+            Constraint::Min(5),
+        ])
+        .split(columns[0]);
+        draw_header(frame, app, left[0]);
+        draw_schedule(frame, app, left[1]);
+        draw_memo(frame, app, left[2]);
+        let right = Layout::vertical([
+            Constraint::Min(4),
+            Constraint::Length(10),
+            Constraint::Length(5),
+        ])
+        .split(columns[1]);
+        draw_todo(frame, app, right[0]);
+        draw_month(
             frame,
             &mut app.hits,
-            x,
-            inner.y + 1,
-            "[y Year]",
-            Action::Calendar,
-            inner.right(),
+            &app.written,
+            right[1],
+            app.date,
+            app.date,
+            app.date,
+            true,
         );
-        button(
-            frame,
-            &mut app.hits,
-            x,
-            inner.y + 1,
-            "[g Date]",
-            Action::Key(KeyCode::Char('g')),
-            inner.right(),
-        );
-    }
-    let body = rows[1];
-    if area.width >= 86 && body.height >= 10 {
-        let columns = Layout::horizontal([Constraint::Min(40), Constraint::Length(32)]).split(body);
-        let schedule_h = (app.journal.schedule.len().saturating_add(2).min(10) as u16)
-            .clamp(4, (body.height / 3).clamp(4, 10));
-        let left = Layout::vertical([Constraint::Length(schedule_h), Constraint::Min(3)])
-            .split(columns[0]);
-        draw_list(frame, app, left[0], Focus::Schedule);
-        draw_memo(frame, app, left[1]);
-        if body.height >= 18 {
-            let right = Layout::vertical([
-                Constraint::Min(4),
-                Constraint::Length(10),
-                Constraint::Length(3),
-            ])
-            .split(columns[1]);
-            draw_list(frame, app, right[0], Focus::Todo);
-            draw_month(
-                frame,
-                &mut app.hits,
-                right[1],
-                app.date,
-                app.date,
-                app.date,
-                true,
-            );
-            frame.render_widget(
-                Paragraph::new("A day is a little life.").block(block(" words ".into(), false)),
-                right[2],
-            );
-        } else {
-            draw_list(frame, app, columns[1], Focus::Todo);
-        }
-    } else if area.width >= 60 && body.height >= 10 {
+        draw_words(frame, app, right[2]);
+    } else if area.width >= 60 && body.height >= 16 {
         let sections = Layout::vertical([
-            Constraint::Length((body.height / 3).max(4)),
+            Constraint::Length(3),
+            Constraint::Length(schedule_height(app, body.width * 3 / 5, body.height - 3)),
             Constraint::Min(5),
         ])
         .split(body);
-        let top = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
-            .split(sections[0]);
-        draw_list(frame, app, top[0], Focus::Schedule);
-        draw_list(frame, app, top[1], Focus::Todo);
-        draw_memo(frame, app, sections[1]);
+        draw_header(frame, app, sections[0]);
+        let top = Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)])
+            .split(sections[1]);
+        draw_schedule(frame, app, top[0]);
+        draw_todo(frame, app, top[1]);
+        draw_memo(frame, app, sections[2]);
     } else {
         // Narrow terminals keep the active panel readable; all sections stay keyboard-accessible.
+        let parts = Layout::vertical([Constraint::Length(1), Constraint::Min(8)]).split(body);
+        put(frame, parts[0], header_line(app.date, 1));
         match app.focus {
-            Focus::Memo => draw_memo(frame, app, body),
-            focus => draw_list(frame, app, body, focus),
+            Focus::Memo => draw_memo(frame, app, parts[1]),
+            Focus::Todo => draw_todo(frame, app, parts[1]),
+            Focus::Schedule => draw_schedule(frame, app, parts[1]),
         }
     }
-    let footer = rows[2];
-    let mut x = footer.x;
-    for (label, action) in [
-        ("[s Schedule]", Action::Focus(Focus::Schedule)),
-        ("[t Todo]", Action::Focus(Focus::Todo)),
-        ("[f Memo]", Action::Focus(Focus::Memo)),
-        ("[y Year]", Action::Calendar),
-    ] {
-        x = button(
-            frame,
-            &mut app.hits,
-            x,
-            footer.y,
-            label,
-            action,
-            footer.right(),
-        );
+    draw_footer(frame, app, rows[1]);
+}
+
+/// The schedule only grows with what is written; the rest of the column stays
+/// with free memo.
+fn schedule_height(app: &App, width: u16, available: u16) -> u16 {
+    let text_width = width.saturating_sub(4 + GUTTER).max(1);
+    let needed = schedule::rows(&app.journal, text_width).len() as u16 + 2;
+    let ceiling = (available * 3 / 5).max(6).min(available.saturating_sub(5));
+    needed.clamp(6, ceiling.max(6))
+}
+
+/// The page's date as a planner prints it: `09-11 (金) · day 254 · New moon`.
+fn header_line(date: NaiveDate, indent: usize) -> Line<'static> {
+    let weekday =
+        ["月", "火", "水", "木", "金", "土", "日"][date.weekday().num_days_from_monday() as usize];
+    Line::from(vec![
+        Span::styled(
+            format!(
+                "{}{} ({}) · day {}",
+                " ".repeat(indent),
+                date.format("%m-%d"),
+                weekday,
+                date.ordinal()
+            ),
+            Style::default().bold(),
+        ),
+        Span::raw(format!(" · {}", moon(date))),
+    ])
+}
+
+fn draw_header(frame: &mut Frame, app: &mut App, area: Rect) {
+    let header = block("techō", false);
+    let inner = header.inner(area);
+    frame.render_widget(header, area);
+    if inner.height == 0 {
+        return;
     }
-    let hint = match app.focus {
-        Focus::Schedule => "n Add · Enter Edit · d Delete · Up/Down Select",
-        Focus::Todo => "n Add · Enter Edit · Space Check · d Delete · Up/Down Select",
-        Focus::Memo => "Enter/e Write · Up/Down or wheel Scroll",
-    };
     put(
         frame,
-        Rect::new(footer.x, footer.y + 1, footer.width, 1),
-        hint.to_string(),
-    );
-    put(
-        frame,
-        Rect::new(footer.x, footer.y + 2, footer.width, 1),
-        "Tab Switch · y Year · g Date · [/] Day · Home Today · ? Help · q Quit".to_string(),
-    );
-    put(
-        frame,
-        Rect::new(footer.x, footer.y + 3, footer.width, 1),
-        Line::styled(app.status.clone(), accent()),
+        Rect::new(inner.x, inner.y, inner.width, 1),
+        header_line(app.date, 0),
     );
 }
 
-fn draw_list(frame: &mut Frame, app: &mut App, area: Rect, focus: Focus) {
-    let active = app.focus == focus;
-    let (name, key, count, selected, offset) = match focus {
-        Focus::Schedule => (
-            "schedule",
-            's',
-            app.journal.schedule.len(),
-            app.selected_schedule,
-            &mut app.schedule_offset,
-        ),
-        _ => (
-            "todo",
-            't',
-            app.journal.tasks.len(),
-            app.selected_task,
-            &mut app.task_offset,
-        ),
-    };
-    let title = format!(
-        "{} {}/{} ",
-        panel_title(name, key, active),
-        if count == 0 { 0 } else { selected + 1 },
-        count
-    );
-    let border = block(title, active);
+/// The day's items in time order; items at the same time gather under one label.
+/// A small mark on the rule where the page continues: on the bottom rule when
+/// more lies below, on the top rule when the view has moved past the start.
+fn overflow(frame: &mut Frame, area: Rect, above: bool, below: bool) {
+    if area.width < 8 || area.height < 2 {
+        return;
+    }
+    let x = area.right() - 5;
+    if above {
+        put(
+            frame,
+            Rect::new(x, area.y, 3, 1),
+            Line::styled(" ⋯ ", ink()),
+        );
+    }
+    if below {
+        put(
+            frame,
+            Rect::new(x, area.bottom() - 1, 3, 1),
+            Line::styled(" ⋯ ", ink()),
+        );
+    }
+}
+
+fn draw_schedule(frame: &mut Frame, app: &mut App, area: Rect) {
+    let active = app.focus == Focus::Schedule;
+    let border = block("schedule", active);
     let inner = border.inner(area);
     frame.render_widget(border, area);
-    app.hits.push((area, Action::Focus(focus)));
+    app.hits.push((area, Action::Focus(Focus::Schedule)));
+    if inner.height == 0 || inner.width <= GUTTER + 1 {
+        return;
+    }
+    let text_width = inner.width - GUTTER;
+    app.schedule_area = Some(inner);
+    app.schedule_rows = schedule::rows(&app.journal, text_width);
+    if let Some(entry) = app.schedule_jump.take()
+        && let Some(row) = app.schedule_rows.iter().position(|row| row.entry == entry)
+    {
+        app.schedule_row = row;
+    }
+    let count = app.schedule_rows.len();
     let height = inner.height as usize;
+    app.schedule_row = app.schedule_row.min(count.saturating_sub(1));
+    app.schedule_offset = app.schedule_offset.min(count.saturating_sub(height));
+    if app.schedule_row < app.schedule_offset {
+        app.schedule_offset = app.schedule_row;
+    }
+    if app.schedule_row >= app.schedule_offset + height {
+        app.schedule_offset = app.schedule_row + 1 - height;
+    }
+    // Keep the whole item under the cursor in view when it fits.
+    if let Some(entry) = app.cursor_entry()
+        && let Some(last) = app.schedule_rows.iter().rposition(|row| row.entry == entry)
+        && last >= app.schedule_offset + height
+        && last + 1 - app.schedule_row <= height
+    {
+        app.schedule_offset = last + 1 - height;
+    }
+    overflow(
+        frame,
+        area,
+        app.schedule_offset > 0,
+        app.schedule_offset + height < count,
+    );
+    let cursor = app.cursor_entry();
+    for (line, i) in (app.schedule_offset..count).take(height).enumerate() {
+        let (entry, timed, text) = {
+            let row = &app.schedule_rows[i];
+            (row.entry, row.timed, clip(&row.text, text_width))
+        };
+        let y = inner.y + line as u16;
+        if i == app.schedule_row {
+            app.schedule_cursor_y = Some(y);
+        }
+        let selected = active && Some(entry) == cursor;
+        let gutter = if timed {
+            format!(
+                "{:<width$}",
+                clock_time(app.journal.schedule[entry].offset_minutes),
+                width = GUTTER as usize
+            )
+        } else {
+            " ".repeat(GUTTER as usize)
+        };
+        put(
+            frame,
+            Rect::new(inner.x, y, GUTTER, 1),
+            Line::styled(
+                gutter,
+                if selected {
+                    Style::default().bold()
+                } else {
+                    muted()
+                },
+            ),
+        );
+        if selected {
+            let shown = if text.is_empty() { " ".into() } else { text };
+            let width = (shown.width() as u16).min(text_width);
+            put(
+                frame,
+                Rect::new(inner.x + GUTTER, y, width, 1),
+                Line::styled(shown, Style::default().reversed()),
+            );
+        } else {
+            put(frame, Rect::new(inner.x + GUTTER, y, text_width, 1), text);
+        }
+        app.hits.push((
+            Rect::new(inner.x, y, inner.width, 1),
+            Action::Select(Focus::Schedule, i),
+        ));
+    }
+}
+
+fn draw_todo(frame: &mut Frame, app: &mut App, area: Rect) {
+    let active = app.focus == Focus::Todo;
+    let border = block("todo", active);
+    let inner = border.inner(area);
+    frame.render_widget(border, area);
+    app.hits.push((area, Action::Focus(Focus::Todo)));
+    app.todo_area = Some(inner);
+    let height = inner.height as usize;
+    let count = app.journal.tasks.len();
     if height == 0 {
         return;
     }
+    let offset = &mut app.task_offset;
     *offset = (*offset).min(count.saturating_sub(height));
+    let selected = app.selected_task.min(count.saturating_sub(1));
     if selected < *offset {
         *offset = selected;
     }
     if selected >= *offset + height {
         *offset = selected + 1 - height;
     }
-    if count == 0 {
-        put(
-            frame,
-            inner,
-            Line::styled(
-                if focus == Focus::Schedule {
-                    "n  Add a time + item"
-                } else {
-                    "n  Add a todo"
-                },
-                muted(),
-            ),
-        );
-        return;
-    }
+    let (above, below) = (*offset > 0, *offset + height < count);
+    overflow(frame, area, above, below);
+    app.todo_next_y = Some(inner.y + (count.saturating_sub(*offset).min(height - 1)) as u16);
     for (row, i) in (*offset..count).take(height).enumerate() {
-        let (prefix, text) = if focus == Focus::Schedule {
-            let entry = &app.journal.schedule[i];
-            (
-                format!("{:<12} ", format_time(entry.offset_minutes)),
-                entry.text.as_str(),
-            )
-        } else {
-            let task = &app.journal.tasks[i];
-            (
-                format!("[{}] ", if task.done { 'x' } else { ' ' }),
-                task.text.as_str(),
-            )
-        };
-        let first = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
-        let preview = format!(
-            "{}{}{}",
-            if active && i == selected { "> " } else { "  " },
-            prefix,
-            first
-        );
-        let multiline = if text.contains('\n') { " ↵" } else { "" };
+        let task = &app.journal.tasks[i];
+        let first = task
+            .text
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("");
+        let more = if task.text.contains('\n') { " ↵" } else { "" };
         let preview = format!(
             "{}{}",
             clip(
-                &preview,
-                inner
-                    .width
-                    .saturating_sub(if multiline.is_empty() { 0 } else { 2 })
+                &format!("[{}] {}", if task.done { 'x' } else { ' ' }, first),
+                inner.width.saturating_sub(more.width() as u16)
             ),
-            multiline
+            more
         );
         let rect = Rect::new(inner.x, inner.y + row as u16, inner.width, 1);
+        if i == selected {
+            app.todo_cursor_y = Some(rect.y);
+        }
         let style = if active && i == selected {
-            Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
+            Style::default().reversed()
+        } else if task.done {
+            muted()
         } else {
             Style::default()
         };
-        put(
-            frame,
-            rect,
-            Line::styled(clip(&preview, inner.width), style),
-        );
-        app.hits.push((rect, Action::Select(focus, i)));
+        put(frame, rect, Line::styled(preview, style));
+        app.hits.push((rect, Action::Select(Focus::Todo, i)));
     }
 }
 
 fn draw_memo(frame: &mut Frame, app: &mut App, area: Rect) {
-    let border = block(
-        panel_title("free memo", 'f', app.focus == Focus::Memo),
-        app.focus == Focus::Memo,
-    );
+    let border = block("free memo", app.focus == Focus::Memo);
     let inner = border.inner(area);
     frame.render_widget(border, area);
     app.hits.push((area, Action::Focus(Focus::Memo)));
-    if app.journal.free_memo.is_empty() {
-        put(
-            frame,
-            inner,
-            Line::styled(
-                "Enter to write. A thought, an experiment, a little of today.",
-                muted(),
-            ),
-        );
+    app.memo_area = Some(inner);
+    if app.journal.free_memo.is_empty() || inner.height == 0 {
         return;
     }
     let (lines, _) = TextEditor::new(app.journal.free_memo.clone()).visual(inner.width);
     app.memo_scroll = app
         .memo_scroll
         .min(lines.len().saturating_sub(inner.height as usize));
+    // While writing in place the editor scrolls on its own, so the marks rest.
+    if !matches!(&app.editing, Some(edit) if edit.target == EditTarget::Memo) {
+        overflow(
+            frame,
+            area,
+            app.memo_scroll > 0,
+            app.memo_scroll + (inner.height as usize) < lines.len(),
+        );
+    }
     let text = lines
         .into_iter()
         .skip(app.memo_scroll)
@@ -382,9 +442,113 @@ fn draw_memo(frame: &mut Frame, app: &mut App, area: Rect) {
     put(frame, inner, text);
 }
 
+fn draw_words(frame: &mut Frame, app: &mut App, area: Rect) {
+    let border = block("words", false);
+    let inner = border.inner(area);
+    frame.render_widget(border, area);
+    frame.render_widget(
+        Paragraph::new(words::for_date(&app.words, app.date)).wrap(Wrap { trim: true }),
+        inner,
+    );
+}
+
+/// While writing, the footer carries the few keys that matter and any error.
+fn draw_editing_footer(frame: &mut Frame, app: &mut App, area: Rect) -> bool {
+    let Some(edit) = &app.editing else {
+        return false;
+    };
+    if !edit.error.is_empty() {
+        put(
+            frame,
+            area,
+            Line::styled(format!(" {}", edit.error), Style::default().fg(Color::Red)),
+        );
+        return true;
+    }
+    let jump = edit.target == EditTarget::Jump;
+    let schedule = matches!(edit.target, EditTarget::Schedule(_));
+    let time_active = edit.time_active;
+    let mut x = button(
+        frame,
+        &mut app.hits,
+        area.x + 1,
+        area.y,
+        if jump {
+            "Enter open"
+        } else {
+            "Ctrl+S or Ctrl+Enter save"
+        },
+        Action::Save,
+        area.right(),
+    );
+    x = button(
+        frame,
+        &mut app.hits,
+        x,
+        area.y,
+        "Esc cancel",
+        Action::Cancel,
+        area.right(),
+    );
+    if schedule {
+        button(
+            frame,
+            &mut app.hits,
+            x,
+            area.y,
+            if time_active {
+                "Enter back to text"
+            } else {
+                "Tab time"
+            },
+            if time_active {
+                Action::BodyField
+            } else {
+                Action::TimeField
+            },
+            area.right(),
+        );
+    }
+    true
+}
+
+/// The keys that matter on the focused panel, in one muted line.
+fn hints(app: &App) -> &'static str {
+    match app.focus {
+        Focus::Schedule => {
+            "Enter write · n new · d delete · Up/Down move · Tab panel · [ ] day · y year"
+        }
+        Focus::Todo => "Enter edit · n new · Space check · d delete · Tab panel · [ ] day · y year",
+        Focus::Memo => "Enter write · Up/Down scroll · Tab panel · [ ] day · y year",
+    }
+}
+
+/// One quiet line: a message for a moment, otherwise the hints, and `?`.
+fn draw_footer(frame: &mut Frame, app: &mut App, area: Rect) {
+    if area.height == 0 || draw_editing_footer(frame, app, area) {
+        return;
+    }
+    let text = app.status_line().unwrap_or_else(|| hints(app)).to_string();
+    put(
+        frame,
+        area,
+        Line::styled(
+            clip(&format!(" {text}"), area.width.saturating_sub(3)),
+            muted(),
+        ),
+    );
+    if area.width > 4 {
+        let rect = Rect::new(area.right() - 2, area.y, 1, 1);
+        put(frame, rect, Line::styled("?", muted()));
+        app.hits.push((rect, Action::Key(KeyCode::Char('?'))));
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn draw_month(
     frame: &mut Frame,
     hits: &mut Vec<(Rect, Action)>,
+    written: &HashSet<NaiveDate>,
     area: Rect,
     month: NaiveDate,
     selected: NaiveDate,
@@ -392,11 +556,12 @@ fn draw_month(
     main: bool,
 ) {
     let title = if main {
-        format!(" {} · y Year ", month.format("%Y-%m"))
+        // The month's traditional name sits on the calendar, the tab a planner prints there.
+        format!("{} · {}", month.format("%Y-%m"), theme::month(month).name)
     } else {
-        format!(" {} ", MONTHS[month.month0() as usize])
+        MONTHS[month.month0() as usize].to_string()
     };
-    let border = block(title, !main && selected.month() == month.month());
+    let border = block(&title, !main && selected.month() == month.month());
     let inner = border.inner(area);
     frame.render_widget(border, area);
     if main {
@@ -405,7 +570,7 @@ fn draw_month(
     put(
         frame,
         Rect::new(inner.x, inner.y, inner.width, 1),
-        " Mo  Tu  We  Th  Fr  Sa  Su".to_string(),
+        Line::styled(" Mo  Tu  We  Th  Fr  Sa  Su", muted()),
     );
     let first = month.with_day(1).unwrap();
     let padding = first.weekday().num_days_from_monday();
@@ -420,19 +585,27 @@ fn draw_month(
         if x + 4 > inner.right() || y >= inner.bottom() {
             continue;
         }
-        let label = if date == selected {
-            format!("[{day:02}]")
+        // A dot after the number is the ink of a written day.
+        let label = format!(
+            " {day:02}{}",
+            if written.contains(&date) { "·" } else { " " }
+        );
+        // Today is a small tab in the month's colour, like the active panel's title;
+        // the open page, when it is another day, is a plain one.
+        let style = if main {
+            if date == today {
+                ink().reversed()
+            } else if date == opened {
+                Style::default().reversed()
+            } else {
+                Style::default()
+            }
+        } else if date == selected {
+            Style::default().reversed()
         } else if date == today {
-            format!("({day:02})")
+            ink().reversed()
         } else if date == opened {
-            format!("{{{day:02}}}")
-        } else {
-            format!(" {day:02} ")
-        };
-        let style = if date == selected {
-            accent().reversed().bold()
-        } else if date == today {
-            accent().bold()
+            Style::default().bold()
         } else {
             Style::default()
         };
@@ -446,38 +619,38 @@ fn draw_year(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
     let selected = app.calendar.unwrap();
     let rows = Layout::vertical([
-        Constraint::Length(2),
+        Constraint::Length(1),
         Constraint::Min(8),
-        Constraint::Length(3),
+        Constraint::Length(1),
     ])
     .split(area);
+    let title = rows[0];
+    let x = button(
+        frame,
+        &mut app.hits,
+        title.x + 1,
+        title.y,
+        "‹",
+        Action::Key(KeyCode::Char('[')),
+        title.right(),
+    );
+    let year = selected.year().to_string();
     put(
         frame,
-        Rect::new(area.x, area.y, area.width, 1),
-        Line::styled(
-            format!(" techō · {} · choose a day", selected.year()),
-            accent().bold(),
-        ),
+        Rect::new(x, title.y, year.width() as u16, 1),
+        Line::styled(year.clone(), Style::default().bold()),
     );
-    let mut x = area.x;
-    for (label, key) in [
-        ("[<Year]", '['),
-        ("[Year>]", ']'),
-        ("[Today]", 't'),
-        ("[g Date]", 'g'),
-    ] {
-        x = button(
-            frame,
-            &mut app.hits,
-            x,
-            area.y + 1,
-            label,
-            Action::Key(KeyCode::Char(key)),
-            area.right(),
-        );
-    }
+    button(
+        frame,
+        &mut app.hits,
+        x + year.width() as u16 + 2,
+        title.y,
+        "›",
+        Action::Key(KeyCode::Char(']')),
+        title.right(),
+    );
     let grid = rows[1];
-    let cols = (grid.width / 30).clamp(1, 4);
+    let cols = (grid.width / 32).clamp(1, 4);
     let rows_count = (grid.height / 9).clamp(1, 4);
     let per_page = (cols * rows_count).min(12) as u32;
     app.calendar_page_size = per_page as i32;
@@ -495,9 +668,12 @@ fn draw_year(frame: &mut Frame, app: &mut App) {
             cell_width,
             cell_height,
         );
+        // Each month in its own colour, like the coloured tabs along a planner's edge.
+        set_ink(theme::MONTHS[month as usize - 1].color());
         draw_month(
             frame,
             &mut app.hits,
+            &app.written,
             rect,
             NaiveDate::from_ymd_opt(selected.year(), month, 1).unwrap(),
             selected,
@@ -505,56 +681,27 @@ fn draw_year(frame: &mut Frame, app: &mut App) {
             false,
         );
     }
+    set_ink(theme::month(app.date).color());
     let footer = rows[2];
-    let x = button(
-        frame,
-        &mut app.hits,
-        footer.x,
-        footer.y,
-        "[PgUp]",
-        Action::Key(KeyCode::PageUp),
-        footer.right(),
-    );
-    let x = button(
-        frame,
-        &mut app.hits,
-        x,
-        footer.y,
-        "[PgDn]",
-        Action::Key(KeyCode::PageDown),
-        footer.right(),
-    );
-    button(
-        frame,
-        &mut app.hits,
-        x,
-        footer.y,
-        "[Esc Back]",
-        Action::Key(KeyCode::Esc),
-        footer.right(),
-    );
+    if draw_editing_footer(frame, app, footer) {
+        return;
+    }
+    let text = match app.status_line() {
+        Some(status) => format!(" {status}"),
+        None => format!(
+            " {selected}   arrows move · Enter open · [ ] year · PgUp/PgDn page · t today · Esc back"
+        ),
+    };
     put(
         frame,
-        Rect::new(footer.x, footer.y + 1, footer.width, 1),
-        if footer.width < 60 {
-            "Arrows: pick · Enter/click: open".into()
-        } else {
-            format!("{} · Arrows: select · Enter/click: open", selected)
-        },
+        footer,
+        Line::styled(clip(&text, footer.width.saturating_sub(3)), muted()),
     );
-    put(
-        frame,
-        Rect::new(footer.x, footer.y + 2, footer.width, 1),
-        if app.status.is_empty() {
-            if footer.width < 60 {
-                "[dd] Selected · (dd) Today".into()
-            } else {
-                "[dd] Selected · (dd) Today · {dd} Open day".into()
-            }
-        } else {
-            app.status.clone()
-        },
-    );
+    if footer.width > 4 {
+        let rect = Rect::new(footer.right() - 2, footer.y, 1, 1);
+        put(frame, rect, Line::styled("?", muted()));
+        app.hits.push((rect, Action::Key(KeyCode::Char('?'))));
+    }
 }
 
 fn popup(area: Rect, width: u16, height: u16) -> Rect {
@@ -568,70 +715,122 @@ fn popup(area: Rect, width: u16, height: u16) -> Rect {
     )
 }
 
+/// A note that opens where the cursor is: on the schedule row, on the todo row,
+/// or inside free memo itself. The page stays around it.
+fn note_rect(
+    panel: Option<Rect>,
+    row_y: Option<u16>,
+    indent: u16,
+    wanted: u16,
+    area: Rect,
+) -> Rect {
+    match panel {
+        Some(inner) if inner.height >= 4 && inner.width > indent + 8 => {
+            let height = wanted.clamp(4, inner.height);
+            let mut y = row_y.unwrap_or(inner.y).clamp(inner.y, inner.bottom() - 1);
+            if y + height > inner.bottom() {
+                y = inner.bottom() - height;
+            }
+            Rect::new(inner.x + indent, y, inner.width - indent, height)
+        }
+        _ => popup(
+            area,
+            area.width.saturating_sub(4).clamp(20, 72),
+            area.height.saturating_sub(2).clamp(4, 10),
+        ),
+    }
+}
+
 fn draw_editor(frame: &mut Frame, app: &mut App) {
-    app.hits.clear();
     let edit = app.editing.as_ref().unwrap();
-    let schedule = matches!(edit.target, EditTarget::Schedule(_));
-    let jump = edit.target == EditTarget::Jump;
-    let area = popup(
-        frame.area(),
-        92,
-        if jump {
-            9
-        } else {
-            frame.area().height.saturating_sub(2)
-        },
-    );
-    frame.render_widget(Clear, area);
-    let title = match edit.target {
-        EditTarget::Schedule(None) => " Add schedule ",
-        EditTarget::Schedule(_) => " Edit schedule ",
-        EditTarget::Task(None) => " Add todo ",
-        EditTarget::Task(_) => " Edit todo ",
-        EditTarget::Memo => " Write free memo ",
-        EditTarget::Jump => " Go to date · YYYY-MM-DD ",
-    };
-    let border = block(title.into(), true);
-    let inner = border.inner(area);
-    frame.render_widget(border, area);
-    let parts = Layout::vertical([
-        Constraint::Length(if schedule { 3 } else { 0 }),
-        Constraint::Min(1),
-        Constraint::Length(3),
-    ])
-    .split(inner);
-    if schedule {
-        let time_border = block(
-            format!(
-                " {}Time HH:MM · 00:00-03:59 = next day ",
-                if edit.time_active { "> " } else { "" }
+    let area = frame.area();
+    if edit.target == EditTarget::Memo
+        && let Some(inner) = app.memo_area
+        && inner.height > 0
+    {
+        // Free memo is written in place.
+        frame.render_widget(Clear, inner);
+        draw_text(frame, edit, inner);
+        app.hits.push((inner, Action::BodyField));
+        return;
+    }
+    let lines = edit
+        .text
+        .visual(area.width.saturating_sub(4).max(1))
+        .0
+        .len() as u16
+        + 2;
+    let (rect, title) = match edit.target {
+        EditTarget::Schedule(_) => (
+            note_rect(
+                app.schedule_area,
+                app.schedule_cursor_y,
+                GUTTER - 1,
+                lines,
+                area,
             ),
-            edit.time_active,
-        );
-        let field = time_border.inner(parts[0]);
-        frame.render_widget(time_border, parts[0]);
-        put(frame, field, edit.time.text.clone());
-        if edit.time_active && field.width > 0 {
+            edit.time.text.clone(),
+        ),
+        EditTarget::Task(index) => (
+            note_rect(
+                app.todo_area,
+                if index.is_some() {
+                    app.todo_cursor_y
+                } else {
+                    app.todo_next_y
+                },
+                0,
+                lines,
+                area,
+            ),
+            "todo".into(),
+        ),
+        EditTarget::Memo => (
+            popup(
+                area,
+                area.width.saturating_sub(4).clamp(20, 72),
+                area.height.saturating_sub(2).clamp(4, 12),
+            ),
+            "free memo".into(),
+        ),
+        EditTarget::Jump => (popup(area, 24, 3), "YYYY-MM-DD".into()),
+    };
+    let schedule = matches!(edit.target, EditTarget::Schedule(_));
+    frame.render_widget(Clear, rect);
+    let note = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(ink())
+        .padding(Padding::horizontal(1))
+        .title(Line::styled(
+            format!(" {title} "),
+            if schedule && edit.time_active {
+                ink().bold().reversed()
+            } else {
+                ink().bold()
+            },
+        ));
+    let body = note.inner(rect);
+    frame.render_widget(note, rect);
+    draw_text(frame, edit, body);
+    if schedule {
+        // The time lives in the note's title; Tab moves the cursor up there.
+        if edit.time_active {
             frame.set_cursor_position((
-                field.x + (edit.time.cursor as u16).min(field.width - 1),
-                field.y,
+                (rect.x + 2 + edit.time.cursor as u16).min(rect.right().saturating_sub(2)),
+                rect.y,
             ));
         }
-        app.hits.push((parts[0], Action::TimeField));
+        app.hits
+            .push((Rect::new(rect.x, rect.y, rect.width, 1), Action::TimeField));
     }
-    let body_border = block(
-        if schedule {
-            format!(
-                " {}Item · Enter for new line ",
-                if edit.time_active { "" } else { "> " }
-            )
-        } else {
-            " Text ".into()
-        },
-        !edit.time_active,
-    );
-    let body = body_border.inner(parts[1]);
-    frame.render_widget(body_border, parts[1]);
+    app.hits.push((body, Action::BodyField));
+}
+
+fn draw_text(frame: &mut Frame, edit: &crate::app::Editing, body: Rect) {
+    if body.width == 0 || body.height == 0 {
+        return;
+    }
     let (lines, (cx, cy)) = edit.text.visual(body.width);
     let scroll = cy.saturating_sub(body.height.saturating_sub(1) as usize);
     put(
@@ -644,63 +843,47 @@ fn draw_editor(frame: &mut Frame, app: &mut App) {
             .map(Line::from)
             .collect::<Vec<_>>(),
     );
-    if !edit.time_active && body.width > 0 && body.height > 0 {
+    if !edit.time_active {
         frame.set_cursor_position((
             body.x + cx.min(body.width - 1),
             body.y + (cy - scroll) as u16,
         ));
     }
-    app.hits.push((parts[1], Action::BodyField));
-    let foot = parts[2];
-    put(
-        frame,
-        Rect::new(foot.x, foot.y, foot.width, 1),
-        Line::styled(edit.error.clone(), Style::default().fg(Color::Red)),
-    );
-    let x = button(
-        frame,
-        &mut app.hits,
-        foot.x,
-        foot.y + 1,
-        if jump {
-            "[Enter Open]"
-        } else {
-            "[Ctrl+S Save]"
-        },
-        Action::Save,
-        foot.right(),
-    );
-    button(
-        frame,
-        &mut app.hits,
-        x,
-        foot.y + 1,
-        "[Esc Cancel]",
-        Action::Cancel,
-        foot.right(),
-    );
-    put(
-        frame,
-        Rect::new(foot.x, foot.y + 2, foot.width, 1),
-        if schedule {
-            "Tab: time / item · Enter: new line · Arrows/Home/End: cursor"
-        } else {
-            "Enter: new line · Arrows/Home/End: cursor · Ctrl+S: save"
-        }
-        .to_string(),
-    );
 }
 
 fn draw_help(frame: &mut Frame, app: &mut App) {
     app.hits.clear();
     let area = popup(frame.area(), 78, 20);
     frame.render_widget(Clear, area);
+    let month = theme::month(app.date);
     let text = format!(
-        "s Schedule   t Todo   f Free memo   Tab/Shift+Tab Switch\nClick a panel to select it; click a list row to select an item.\nn Add   Enter/e Edit   d Delete   Space Check todo\nUp/Down or mouse wheel: select items / scroll memo\n\ny Year calendar   g Go to YYYY-MM-DD   [/] Previous/next day\nHome Today   q Quit\nYear: arrows select; Enter/click opens; [/] changes year.\nPgUp/PgDn or wheel: calendar pages. Esc returns.\n\nEditor: Ctrl+S saves; Esc cancels. Enter adds a line.\nSchedule: Tab switches time / item. 00:00-03:59 is next day.\nPaste supported. Long text scrolls with the cursor.\nMoon: approximate phase at 12:00 UTC on the selected date.\n\nFiles: {}\n\nPress any key to close.",
+        "s schedule   t todo   f free memo   Tab switch   or click a panel\n\
+         Up/Down move   Enter write or edit   n new   d delete   Space check a todo\n\
+         Down past the last item starts a new one, at the time now on today's page.\n\
+         schedule: n writes an item; its time is the note's title, Tab to change it.\n\
+         Type 9, 930 or 09:30. Items at the same time gather together.\n\
+         The paper day runs 04:00 to 03:59, so 00:00-03:59 belongs to the night after.\n\
+         \n\
+         [ ] previous / next day   Home today   g go to a date   y the year\n\
+         year: arrows move, Enter opens, [ ] change year, PgUp/PgDn page, Esc back\n\
+         \n\
+         editor: Ctrl+S or Ctrl+Enter saves, Esc cancels, Enter adds a line, paste works.\n\
+         moon: an approximate phase for the date; the date's day number is day N.\n\
+         this month is {} ({}), and its pages are printed in {}.\n\
+         \n\
+         files: {}\n\
+         words: words.txt beside the journals, one line per day, if you want your own.\n\
+         \n\
+         ? or F1 shows this again. Any key closes it.",
+        month.name,
+        month.reading,
+        month.colour,
         app.store.dir.display()
     );
     frame.render_widget(
-        Paragraph::new(text).block(block(" Help ".into(), true)),
+        Paragraph::new(text)
+            .wrap(Wrap { trim: false })
+            .block(block("techō", false)),
         area,
     );
     app.hits.push((area, Action::Key(KeyCode::Esc)));
@@ -708,19 +891,18 @@ fn draw_help(frame: &mut Frame, app: &mut App) {
 
 fn draw_delete(frame: &mut Frame, app: &mut App) {
     app.hits.clear();
-    let area = popup(frame.area(), 46, 5);
+    let area = popup(frame.area(), 40, 5);
     frame.render_widget(Clear, area);
     frame.render_widget(
-        Paragraph::new("Delete the selected item?\nThis change will be saved immediately.")
-            .block(block(" Confirm delete ".into(), true)),
+        Paragraph::new("Delete this item?").block(block("", false)),
         area,
     );
     let x = button(
         frame,
         &mut app.hits,
-        area.x + 1,
+        area.x + 2,
         area.bottom() - 2,
-        "[y Delete]",
+        "y delete",
         Action::Key(KeyCode::Char('y')),
         area.right() - 1,
     );
@@ -729,7 +911,7 @@ fn draw_delete(frame: &mut Frame, app: &mut App) {
         &mut app.hits,
         x,
         area.bottom() - 2,
-        "[Esc Cancel]",
+        "Esc keep",
         Action::Key(KeyCode::Esc),
         area.right() - 1,
     );
@@ -742,7 +924,9 @@ mod tests {
     use crossterm::event::{Event, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
     use ratatui::backend::TestBackend;
     fn app() -> App {
-        App::open(test_dir(), parse_date("2026-09-11").unwrap()).unwrap()
+        let mut app = App::open(test_dir(), parse_date("2026-09-11").unwrap()).unwrap();
+        app.help = false;
+        app
     }
     fn click(app: &mut App, rect: Rect) {
         app.event(Event::Mouse(MouseEvent {
@@ -751,6 +935,15 @@ mod tests {
             row: rect.y,
             modifiers: KeyModifiers::NONE,
         }));
+    }
+    fn screen(terminal: &Terminal<TestBackend>) -> String {
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect()
     }
     #[test]
     fn all_views_survive_small_and_large_sizes() {
@@ -774,6 +967,9 @@ mod tests {
                 terminal.draw(|f| draw(f, &mut app)).unwrap();
                 app.editing = None;
             }
+            app.help = true;
+            terminal.draw(|f| draw(f, &mut app)).unwrap();
+            app.help = false;
             app.calendar = Some(app.date);
             terminal.draw(|f| draw(f, &mut app)).unwrap();
             app.calendar = None;
@@ -783,27 +979,71 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]
-    fn mouse_panel_and_calendar_hit_testing_after_resize() {
+    fn page_is_quiet_and_marks_the_active_panel_without_words() {
         let mut app = app();
+        app.focus = Focus::Memo;
         let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
         terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let text = screen(&terminal);
+        for noise in [
+            "[s]",
+            "[t]",
+            "[f]",
+            "0/0",
+            "> ",
+            "little space",
+            "y Year",
+            "⋯",
+        ] {
+            assert!(!text.contains(noise), "{noise} is on the page");
+        }
+        assert!(text.contains("2026-09"));
         let rect = app
             .hits
             .iter()
             .find(|(_, a)| matches!(a, Action::Focus(Focus::Schedule)))
             .unwrap()
             .0;
+        let tab = |terminal: &Terminal<TestBackend>| {
+            terminal.backend().buffer()[(rect.x + 2, rect.y)]
+                .modifier
+                .contains(Modifier::REVERSED)
+        };
+        assert_eq!(terminal.backend().buffer()[(rect.x, rect.y)].symbol(), "┌");
+        assert!(!tab(&terminal));
         click(&mut app, rect);
         assert_eq!(app.focus, Focus::Schedule);
         terminal.draw(|f| draw(f, &mut app)).unwrap();
-        let text: String = terminal
-            .backend()
-            .buffer()
-            .content
+        assert_eq!(terminal.backend().buffer()[(rect.x, rect.y)].symbol(), "┌");
+        assert!(tab(&terminal));
+        let dir = app.store.dir.clone();
+        drop(app);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn mouse_picks_items_and_calendar_days_after_resize() {
+        let mut app = app();
+        for (time, text) in [(300, "brief"), (300, "second"), (840, "mail")] {
+            app.journal.schedule.push(crate::journal::ScheduleEntry {
+                offset_minutes: time,
+                text: text.into(),
+            });
+        }
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let text = screen(&terminal);
+        assert!(text.contains("09:00  brief"));
+        assert!(text.contains("       second"));
+        assert!(text.contains("18:00  mail"));
+        let rect = app
+            .hits
             .iter()
-            .map(|c| c.symbol())
-            .collect();
-        assert!(text.contains("> schedule"));
+            .find(|(_, a)| matches!(a, Action::Select(Focus::Schedule, 2)))
+            .unwrap()
+            .0;
+        click(&mut app, rect);
+        assert_eq!(app.focus, Focus::Schedule);
+        assert_eq!(app.cursor_entry(), Some(2));
         app.calendar = Some(parse_date("2024-02-29").unwrap());
         terminal.backend_mut().resize(60, 24);
         terminal.resize(Rect::new(0, 0, 60, 24)).unwrap();
@@ -847,39 +1087,113 @@ mod tests {
     }
 
     #[test]
-    fn long_lists_scroll_without_overlapping_other_panels() {
+    fn written_days_are_dotted_in_the_calendar() {
+        let mut app = app();
+        app.focus = Focus::Memo;
+        app.start_edit(false);
+        app.editing.as_mut().unwrap().text.insert("ink");
+        app.commit();
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let text = screen(&terminal);
+        assert!(text.contains(" 11·"));
+        assert!(!text.contains(" 12·"));
+        let dir = app.store.dir.clone();
+        drop(app);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn long_days_scroll_and_show_their_whole_text() {
         let mut app = app();
         for i in 0..30 {
             app.journal.schedule.push(crate::journal::ScheduleEntry {
                 offset_minutes: i * 30,
-                text: format!("Item {i}\n{}", "Long body ".repeat(80)),
+                text: format!("Item {i}\n{}", "Long body ".repeat(8)),
             });
         }
         app.focus = Focus::Schedule;
-        app.selected_schedule = 29;
+        app.schedule_jump = Some(29);
         app.journal.free_memo = "Memo stays visible".into();
         let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
         terminal.draw(|f| draw(f, &mut app)).unwrap();
-        let text: String = terminal
-            .backend()
-            .buffer()
-            .content
-            .iter()
-            .map(|c| c.symbol())
-            .collect();
+        let text = screen(&terminal);
         assert!(text.contains("Item 29"));
-        assert!(text.contains("Memo stays visible"));
-        assert!(!text.contains("Long body"));
-        app.start_edit(false);
-        terminal.draw(|f| draw(f, &mut app)).unwrap();
-        let text: String = terminal
-            .backend()
-            .buffer()
-            .content
-            .iter()
-            .map(|c| c.symbol())
-            .collect();
         assert!(text.contains("Long body"));
+        assert!(text.contains("Memo stays visible"));
+        assert!(!text.contains("Item 0"));
+        assert_eq!(app.cursor_entry(), Some(29));
+        // Scrolled to the end: the page continues above, not below.
+        let schedule = app
+            .hits
+            .iter()
+            .find(|(_, a)| matches!(a, Action::Focus(Focus::Schedule)))
+            .unwrap()
+            .0;
+        let mark = |terminal: &Terminal<TestBackend>, y: u16| {
+            terminal.backend().buffer()[(schedule.right() - 4, y)].symbol() == "⋯"
+        };
+        assert!(mark(&terminal, schedule.y));
+        assert!(!mark(&terminal, schedule.bottom() - 1));
+        app.schedule_jump = Some(0);
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let text = screen(&terminal);
+        assert!(text.contains("04:00  Item 0"));
+        assert!(!text.contains("Item 29"));
+        assert!(!mark(&terminal, schedule.y));
+        assert!(mark(&terminal, schedule.bottom() - 1));
+        let dir = app.store.dir.clone();
+        drop(app);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn writing_happens_on_the_page() {
+        let mut app = app();
+        app.journal.schedule.push(crate::journal::ScheduleEntry {
+            offset_minutes: 480,
+            text: "lunch".into(),
+        });
+        app.focus = Focus::Schedule;
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        app.start_edit(true);
+        app.editing.as_mut().unwrap().text.insert("walk");
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let text = screen(&terminal);
+        for kept in [
+            " 12:00 ",
+            "walk",
+            "todo",
+            "free memo",
+            "2026-09",
+            "Ctrl+S",
+            "Tab time",
+        ] {
+            assert!(text.contains(kept), "{kept} missing while writing");
+        }
+        let note_y = app
+            .hits
+            .iter()
+            .rev()
+            .find(|(_, a)| matches!(a, Action::TimeField))
+            .unwrap()
+            .0
+            .y;
+        assert_eq!(Some(note_y), app.schedule_cursor_y);
+        app.commit();
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let text = screen(&terminal);
+        assert!(text.contains("12:00  lunch"));
+        assert!(text.contains("       walk"));
+        app.focus = Focus::Memo;
+        app.start_edit(false);
+        app.editing.as_mut().unwrap().text.insert("in place");
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let text = screen(&terminal);
+        assert!(text.contains("in place"));
+        assert!(text.contains("12:00  lunch"));
+        assert!(!text.contains("╭"));
         let dir = app.store.dir.clone();
         drop(app);
         std::fs::remove_dir_all(dir).unwrap();
@@ -941,7 +1255,7 @@ mod tests {
                 while x < width {
                     let symbol = buffer[(x, y)].symbol();
                     text.push_str(symbol);
-                    x += unicode_width::UnicodeWidthStr::width(symbol).max(1) as u16;
+                    x += symbol.width().max(1) as u16;
                 }
                 text.push('\n');
             }

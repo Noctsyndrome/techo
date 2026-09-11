@@ -1,15 +1,21 @@
 use crate::{
     calendar::{parse_date, shift_days, shift_months},
     editor::TextEditor,
-    journal::{Journal, ScheduleEntry, Task, clock_time, parse_time},
+    journal::{Journal, ScheduleEntry, Task, clock_time, parse_time_input},
+    schedule::Row,
     storage::Store,
 };
-use chrono::{Local, NaiveDate};
+use chrono::{Local, NaiveDate, Timelike};
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
 use ratatui::layout::Rect;
-use std::{io, path::PathBuf};
+use std::{
+    collections::HashSet,
+    io,
+    path::PathBuf,
+    time::{Duration, Instant},
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Focus {
@@ -47,6 +53,13 @@ pub enum Action {
     Cancel,
 }
 
+/// How long a freshly opened page stays blank, like the beat of turning paper.
+const PAGE_TURN: Duration = Duration::from_millis(45);
+/// How long a message such as "Saved" stays in the footer before the hints return.
+const STATUS_SHOWN: Duration = Duration::from_millis(1500);
+/// Where a new item lands on a day that is not today.
+const DEFAULT_TIME: u16 = 300;
+
 pub struct App {
     pub store: Store,
     pub date: NaiveDate,
@@ -54,43 +67,71 @@ pub struct App {
     pub original: Option<String>,
     pub focus: Focus,
     pub selected_task: usize,
-    pub selected_schedule: usize,
     pub task_offset: usize,
+    pub schedule_row: usize,
     pub schedule_offset: usize,
+    pub schedule_rows: Vec<Row>,
+    /// Entry the schedule cursor should land on once the rows are laid out again.
+    pub schedule_jump: Option<usize>,
     pub memo_scroll: usize,
     pub editing: Option<Editing>,
     pub calendar: Option<NaiveDate>,
     pub calendar_page_size: i32,
     pub hits: Vec<(Rect, Action)>,
     pub status: String,
+    pub status_at: Option<Instant>,
     pub help: bool,
     pub delete_pending: bool,
     pub quit: bool,
+    pub written: HashSet<NaiveDate>,
+    pub words: Vec<String>,
+    pub turned: Option<Instant>,
+    /// Where the panels were drawn last, so a note can open right on the cursor.
+    pub schedule_area: Option<Rect>,
+    pub schedule_cursor_y: Option<u16>,
+    pub todo_area: Option<Rect>,
+    pub todo_cursor_y: Option<u16>,
+    pub todo_next_y: Option<u16>,
+    pub memo_area: Option<Rect>,
 }
 
 impl App {
     pub fn open(dir: PathBuf, date: NaiveDate) -> io::Result<Self> {
         let store = Store::open(dir)?;
         let (journal, original) = store.load(date)?;
+        let written = store.written_dates();
+        let words = store.words();
         Ok(Self {
             store,
             date,
             journal,
             original,
-            focus: Focus::Memo,
+            focus: Focus::Schedule,
             selected_task: 0,
-            selected_schedule: 0,
             task_offset: 0,
+            schedule_row: 0,
             schedule_offset: 0,
+            schedule_rows: Vec::new(),
+            schedule_jump: None,
             memo_scroll: 0,
             editing: None,
             calendar: None,
             calendar_page_size: 1,
             hits: Vec::new(),
             status: String::new(),
-            help: false,
+            status_at: None,
+            help: written.is_empty(),
             delete_pending: false,
             quit: false,
+            written,
+            words,
+            turned: None,
+            schedule_area: None,
+            schedule_cursor_y: None,
+            todo_area: None,
+            todo_cursor_y: None,
+            todo_next_y: None,
+            memo_area: None,
         })
     }
     pub fn open_date(&mut self, date: NaiveDate) {
@@ -104,13 +145,46 @@ impl App {
                 self.original = original;
                 self.calendar = None;
                 self.selected_task = 0;
-                self.selected_schedule = 0;
                 self.task_offset = 0;
+                self.schedule_row = 0;
                 self.schedule_offset = 0;
+                self.schedule_jump = None;
                 self.memo_scroll = 0;
                 self.status.clear();
+                self.turned = Some(Instant::now());
             }
-            Err(e) => self.status = format!("Cannot open {date}: {e}"),
+            Err(e) => self.say(format!("Cannot open {date}: {e}")),
+        }
+    }
+    pub fn turning(&self) -> bool {
+        self.turned.is_some_and(|t| t.elapsed() < PAGE_TURN)
+    }
+    /// Show a short message in the footer; it fades and the hints come back.
+    pub fn say(&mut self, message: impl Into<String>) {
+        self.status = message.into();
+        self.status_at = Some(Instant::now());
+    }
+    pub fn status_line(&self) -> Option<&str> {
+        (!self.status.is_empty() && self.status_at.is_some_and(|t| t.elapsed() < STATUS_SHOWN))
+            .then_some(self.status.as_str())
+    }
+    pub fn cursor_entry(&self) -> Option<usize> {
+        self.schedule_rows
+            .get(self.schedule_row)
+            .map(|row| row.entry)
+            .filter(|i| *i < self.journal.schedule.len())
+    }
+    /// A new item takes the time of the item under the cursor, else now on today's
+    /// page, else a morning hour.
+    fn new_item_time(&self) -> u16 {
+        if let Some(i) = self.cursor_entry() {
+            return self.journal.schedule[i].offset_minutes;
+        }
+        let now = Local::now();
+        if now.date_naive() == self.date {
+            ((now.hour() * 60 + now.minute() + 1200) % 1440) as u16
+        } else {
+            DEFAULT_TIME
         }
     }
     fn persist(&mut self, journal: Journal) -> bool {
@@ -118,11 +192,12 @@ impl App {
             Ok(raw) => {
                 self.journal = journal;
                 self.original = Some(raw);
-                self.status = "Saved".into();
+                self.written.insert(self.date);
+                self.say("Saved");
                 true
             }
             Err(e) => {
-                self.status = format!("Save failed: {e}");
+                self.say(format!("Save failed: {e}"));
                 false
             }
         }
@@ -146,16 +221,16 @@ impl App {
                 )
             }
             Focus::Schedule => {
-                let index = (!new && self.selected_schedule < self.journal.schedule.len())
-                    .then_some(self.selected_schedule);
+                let index = if new { None } else { self.cursor_entry() };
+                let time = index
+                    .map(|i| self.journal.schedule[i].offset_minutes)
+                    .unwrap_or_else(|| self.new_item_time());
                 (
                     EditTarget::Schedule(index),
                     index
                         .map(|i| self.journal.schedule[i].text.clone())
                         .unwrap_or_default(),
-                    index
-                        .map(|i| clock_time(self.journal.schedule[i].offset_minutes))
-                        .unwrap_or_default(),
+                    clock_time(time),
                 )
             }
         };
@@ -163,7 +238,7 @@ impl App {
             target,
             text: TextEditor::new(text),
             time: TextEditor::new(time),
-            time_active: matches!(target, EditTarget::Schedule(_)),
+            time_active: false,
             error: String::new(),
         });
         self.status.clear();
@@ -195,10 +270,10 @@ impl App {
         let mut journal = self.journal.clone();
         if !matches!(target, EditTarget::Memo) && edit.text.text.trim().is_empty() {
             self.editing.as_mut().unwrap().error =
-                "Please enter an item; Esc cancels without adding it".into();
+                "Nothing written yet; Esc leaves without adding it".into();
             return;
         }
-        let mut schedule_selection = None;
+        let mut jump = None;
         match target {
             EditTarget::Memo => journal.free_memo = edit.text.text.clone(),
             EditTarget::Task(index) => {
@@ -212,9 +287,9 @@ impl App {
                 }
             }
             EditTarget::Schedule(index) => {
-                let Some(time) = parse_time(&edit.time.text) else {
+                let Some(time) = parse_time_input(&edit.time.text) else {
                     let edit = self.editing.as_mut().unwrap();
-                    edit.error = "Time must be HH:MM (00:00-23:59)".into();
+                    edit.error = "Time: 9, 930 or 09:30 (00:00-23:59)".into();
                     edit.time_active = true;
                     return;
                 };
@@ -230,7 +305,7 @@ impl App {
                     .schedule
                     .partition_point(|e| e.offset_minutes <= time);
                 journal.schedule.insert(i, entry);
-                schedule_selection = Some(i);
+                jump = Some(i);
             }
             EditTarget::Jump => unreachable!(),
         }
@@ -238,8 +313,8 @@ impl App {
             if target == EditTarget::Task(None) {
                 self.selected_task = self.journal.tasks.len() - 1;
             }
-            if let Some(i) = schedule_selection {
-                self.selected_schedule = i;
+            if jump.is_some() {
+                self.schedule_jump = jump;
             }
             self.editing = None;
         } else {
@@ -255,12 +330,50 @@ impl App {
                     .min(self.journal.tasks.len().saturating_sub(1))
             }
             Focus::Schedule => {
-                self.selected_schedule = self
-                    .selected_schedule
+                // Move by item, landing on its first line.
+                let count = self.journal.schedule.len();
+                let target = self
+                    .cursor_entry()
+                    .unwrap_or(0)
                     .saturating_add_signed(delta)
-                    .min(self.journal.schedule.len().saturating_sub(1))
+                    .min(count.saturating_sub(1));
+                self.schedule_row = self
+                    .schedule_rows
+                    .iter()
+                    .position(|row| row.entry == target)
+                    .unwrap_or(0);
             }
             Focus::Memo => self.memo_scroll = self.memo_scroll.saturating_add_signed(delta),
+        }
+    }
+    /// On the last item of the schedule or todo, or on an empty one.
+    fn at_end(&self) -> bool {
+        match self.focus {
+            Focus::Schedule => self
+                .cursor_entry()
+                .is_none_or(|i| i + 1 >= self.journal.schedule.len()),
+            Focus::Todo => self.selected_task + 1 >= self.journal.tasks.len(),
+            Focus::Memo => false,
+        }
+    }
+    /// Going down past the end starts a new item; on today's page it takes the time now.
+    fn append(&mut self) {
+        self.start_edit(true);
+        let now = Local::now();
+        if now.date_naive() == self.date
+            && let Some(edit) = &mut self.editing
+            && matches!(edit.target, EditTarget::Schedule(None))
+        {
+            edit.time = TextEditor::new(clock_time(
+                ((now.hour() * 60 + now.minute() + 1200) % 1440) as u16,
+            ));
+        }
+    }
+    fn can_delete(&self) -> bool {
+        match self.focus {
+            Focus::Todo => !self.journal.tasks.is_empty(),
+            Focus::Schedule => self.cursor_entry().is_some(),
+            Focus::Memo => false,
         }
     }
     fn delete(&mut self) {
@@ -269,9 +382,13 @@ impl App {
             Focus::Todo if !journal.tasks.is_empty() => {
                 journal.tasks.remove(self.selected_task);
             }
-            Focus::Schedule if !journal.schedule.is_empty() => {
-                journal.schedule.remove(self.selected_schedule);
-            }
+            Focus::Schedule => match self.cursor_entry() {
+                Some(i) => {
+                    journal.schedule.remove(i);
+                    self.schedule_jump = Some(i.min(journal.schedule.len().saturating_sub(1)));
+                }
+                None => return,
+            },
             _ => return,
         }
         if self.persist(journal) {
@@ -282,10 +399,7 @@ impl App {
         if self.editing.is_some() {
             match action {
                 Action::Save => self.commit(),
-                Action::Cancel => {
-                    self.editing = None;
-                    self.status = "Cancelled; no changes saved".into();
-                }
+                Action::Cancel => self.editing = None,
                 Action::TimeField => self.editing.as_mut().unwrap().time_active = true,
                 Action::BodyField => self.editing.as_mut().unwrap().time_active = false,
                 _ => {}
@@ -298,7 +412,7 @@ impl App {
                 self.focus = focus;
                 match focus {
                     Focus::Todo => self.selected_task = i,
-                    Focus::Schedule => self.selected_schedule = i,
+                    Focus::Schedule => self.schedule_row = i,
                     _ => {}
                 }
             }
@@ -423,8 +537,11 @@ impl App {
                 }
                 KeyCode::Char('[') => self.calendar = Some(shift_months(date, -12)),
                 KeyCode::Char(']') => self.calendar = Some(shift_months(date, 12)),
-                KeyCode::Char('t') => self.calendar = Some(Local::now().date_naive()),
+                KeyCode::Char('t') | KeyCode::Home => {
+                    self.calendar = Some(Local::now().date_naive())
+                }
                 KeyCode::Char('g') => self.start_jump(),
+                KeyCode::Char('?') | KeyCode::F(1) => self.help = true,
                 _ => {}
             }
             return;
@@ -452,6 +569,7 @@ impl App {
             KeyCode::Char('n') => self.start_edit(true),
             KeyCode::Char('e') | KeyCode::Enter => self.start_edit(false),
             KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
+            KeyCode::Down | KeyCode::Char('j') if self.at_end() => self.append(),
             KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
             KeyCode::PageUp => self.move_selection(-10),
             KeyCode::PageDown => self.move_selection(10),
@@ -460,9 +578,7 @@ impl App {
                 journal.tasks[self.selected_task].done = !journal.tasks[self.selected_task].done;
                 self.persist(journal);
             }
-            KeyCode::Char('d') | KeyCode::Delete if self.focus != Focus::Memo => {
-                self.delete_pending = true
-            }
+            KeyCode::Char('d') | KeyCode::Delete if self.can_delete() => self.delete_pending = true,
             KeyCode::Char('y') => self.calendar = Some(self.date),
             KeyCode::Char('g') => self.start_jump(),
             KeyCode::Char('[') => self.open_date(shift_days(self.date, -1)),
@@ -479,12 +595,48 @@ mod tests {
     use super::*;
     use crate::storage::test_dir;
     fn app() -> App {
-        App::open(test_dir(), parse_date("2026-09-11").unwrap()).unwrap()
+        let mut app = App::open(test_dir(), parse_date("2026-09-11").unwrap()).unwrap();
+        app.help = false;
+        app
     }
     fn cleanup(app: App) {
         let dir = app.store.dir.clone();
         drop(app);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+    fn times(app: &App) -> Vec<String> {
+        app.journal
+            .schedule
+            .iter()
+            .map(|e| clock_time(e.offset_minutes))
+            .collect()
+    }
+    fn write_item(a: &mut App, time: &str, text: &str) {
+        a.focus = Focus::Schedule;
+        a.start_edit(true);
+        let e = a.editing.as_mut().unwrap();
+        e.time = TextEditor::new(time.into());
+        e.text.insert(text);
+        a.commit();
+        assert!(a.editing.is_none());
+        a.schedule_rows = crate::schedule::rows(&a.journal, 40);
+    }
+    #[test]
+    fn first_launch_shows_help_once() {
+        let a = App::open(test_dir(), parse_date("2026-09-11").unwrap()).unwrap();
+        assert!(a.help);
+        assert_eq!(a.focus, Focus::Schedule);
+        cleanup(a);
+    }
+    #[test]
+    fn messages_fade_from_the_footer() {
+        let mut a = app();
+        assert_eq!(a.status_line(), None);
+        a.say("Saved");
+        assert_eq!(a.status_line(), Some("Saved"));
+        a.status_at = Some(Instant::now() - STATUS_SHOWN);
+        assert_eq!(a.status_line(), None);
+        cleanup(a);
     }
     #[test]
     fn cancelled_new_items_never_touch_model_or_disk() {
@@ -499,40 +651,111 @@ mod tests {
         cleanup(a);
     }
     #[test]
-    fn schedule_requires_time_sorts_and_edits_time() {
+    fn items_sort_gather_by_time_and_move_by_item() {
         let mut a = app();
-        a.focus = Focus::Schedule;
-        for time in ["13:00", "09:00", "00:30"] {
-            a.start_edit(true);
-            let e = a.editing.as_mut().unwrap();
-            e.time.insert(time);
-            e.text.insert("work\nnotes");
-            a.commit();
-            assert!(a.editing.is_none());
-        }
-        assert_eq!(
-            a.journal
-                .schedule
-                .iter()
-                .map(|e| clock_time(e.offset_minutes))
-                .collect::<Vec<_>>(),
-            ["09:00", "13:00", "00:30"]
-        );
-        a.selected_schedule = 0;
+        write_item(&mut a, "13:00", "work\nnotes");
+        assert_eq!(a.schedule_jump, Some(0));
+        write_item(&mut a, "9", "brief");
+        write_item(&mut a, "0030", "late");
+        assert_eq!(times(&a), ["09:00", "13:00", "00:30"]);
+        // A new item next to an existing one takes its time.
+        a.schedule_row = a.schedule_rows.iter().position(|r| r.entry == 1).unwrap();
+        a.start_edit(true);
+        assert_eq!(a.editing.as_ref().unwrap().time.text, "13:00");
+        a.editing.as_mut().unwrap().text.insert("same hour");
+        a.commit();
+        a.schedule_rows = crate::schedule::rows(&a.journal, 40);
+        assert_eq!(times(&a), ["09:00", "13:00", "13:00", "00:30"]);
+        assert_eq!(a.schedule_jump, Some(2));
+        // Up/Down step over an item's lines.
+        a.schedule_row = a.schedule_rows.iter().position(|r| r.entry == 1).unwrap();
+        a.move_selection(1);
+        assert_eq!(a.cursor_entry(), Some(2));
+        a.move_selection(-1);
+        assert_eq!(a.cursor_entry(), Some(1));
+        assert!(a.schedule_rows[a.schedule_row].first);
+        // Enter on an item edits it; changing the time re-sorts.
         a.start_edit(false);
+        assert_eq!(
+            a.editing.as_ref().unwrap().target,
+            EditTarget::Schedule(Some(1))
+        );
         a.editing.as_mut().unwrap().time = TextEditor::new("15:00".into());
         a.commit();
-        assert_eq!(a.selected_schedule, 1);
+        assert_eq!(times(&a), ["09:00", "13:00", "15:00", "00:30"]);
+        assert_eq!(a.schedule_jump, Some(2));
+        // A time that cannot be read keeps the note open.
         a.start_edit(true);
-        a.editing.as_mut().unwrap().text.insert("item");
+        let e = a.editing.as_mut().unwrap();
+        e.time = TextEditor::new("25".into());
+        e.text.insert("item");
         a.commit();
         assert!(a.editing.is_some());
-        assert_eq!(a.journal.schedule.len(), 3);
+        assert!(a.editing.as_ref().unwrap().time_active);
+        assert_eq!(a.journal.schedule.len(), 4);
+        cleanup(a);
+    }
+    #[test]
+    fn down_past_the_end_starts_a_new_item() {
+        let mut a = app();
+        let down = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
+        a.focus = Focus::Todo;
+        a.key(down);
+        assert_eq!(a.editing.as_ref().unwrap().target, EditTarget::Task(None));
+        a.action(Action::Cancel);
+        write_item(&mut a, "09:00", "brief");
+        write_item(&mut a, "13:00", "lunch");
+        a.schedule_row = 0;
+        a.key(down);
+        assert!(a.editing.is_none());
+        assert_eq!(a.cursor_entry(), Some(1));
+        let clock = |t: chrono::DateTime<Local>| {
+            clock_time(((t.hour() * 60 + t.minute() + 1200) % 1440) as u16)
+        };
+        let before = clock(Local::now());
+        a.key(down);
+        let after = clock(Local::now());
+        let e = a.editing.as_ref().unwrap();
+        assert_eq!(e.target, EditTarget::Schedule(None));
+        assert!([before, after].contains(&e.time.text), "{}", e.time.text);
+        assert!(!e.time_active);
+        a.action(Action::Cancel);
+        // The wheel never opens a note.
+        a.move_selection(3);
+        assert!(a.editing.is_none());
+        cleanup(a);
+    }
+    #[test]
+    fn new_items_on_other_days_start_in_the_morning() {
+        let mut a = app();
+        a.open_date(parse_date("2000-01-06").unwrap());
+        a.focus = Focus::Schedule;
+        a.start_edit(true);
+        let e = a.editing.as_ref().unwrap();
+        assert_eq!(e.target, EditTarget::Schedule(None));
+        assert_eq!(e.time.text, "09:00");
+        assert!(!e.time_active);
+        cleanup(a);
+    }
+    #[test]
+    fn delete_only_applies_to_an_item_under_the_cursor() {
+        let mut a = app();
+        a.focus = Focus::Schedule;
+        a.key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        assert!(!a.delete_pending);
+        write_item(&mut a, "10:00", "gone soon");
+        a.schedule_row = 0;
+        a.key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        assert!(a.delete_pending);
+        a.key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+        assert!(a.journal.schedule.is_empty());
+        assert!(a.written.contains(&a.date));
         cleanup(a);
     }
     #[test]
     fn failed_save_retains_draft_and_last_saved_model() {
         let mut a = app();
+        a.focus = Focus::Memo;
         a.start_edit(false);
         a.editing.as_mut().unwrap().text.insert("precious draft");
         std::fs::write(a.store.path(a.date), "external change").unwrap();
@@ -549,6 +772,7 @@ mod tests {
     #[test]
     fn io_failure_can_be_retried_without_losing_draft() {
         let mut a = app();
+        a.focus = Focus::Memo;
         a.start_edit(false);
         a.editing.as_mut().unwrap().text.insert("retry this draft");
         let temporary = a
@@ -571,6 +795,7 @@ mod tests {
     #[test]
     fn dates_are_isolated_and_editing_blocks_navigation() {
         let mut a = app();
+        a.focus = Focus::Memo;
         let first = a.date;
         let other = parse_date("2027-02-01").unwrap();
         a.start_edit(false);
@@ -583,6 +808,7 @@ mod tests {
         assert_eq!(a.date, first);
         a.commit();
         a.open_date(other);
+        assert!(a.turning());
         assert!(a.journal.free_memo.is_empty());
         assert!(!a.store.path(other).exists());
         a.open_date(first);

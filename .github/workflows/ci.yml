@@ -1,5 +1,7 @@
 name: Rust
-on: [push, pull_request]
+# Manual only while the project is early; run it from the Actions tab when a
+# Linux check (build, tests, PTY smoke) is wanted before a release.
+on: workflow_dispatch
 jobs:
   check:
     strategy:

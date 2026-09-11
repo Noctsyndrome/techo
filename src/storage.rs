@@ -1,6 +1,7 @@
-use crate::journal::Journal;
+use crate::{calendar::parse_date, journal::Journal};
 use chrono::NaiveDate;
 use std::{
+    collections::HashSet,
     fs::{self, File, OpenOptions},
     io::{self, Write},
     path::{Path, PathBuf},
@@ -63,6 +64,32 @@ impl Store {
         let raw = journal.to_markdown(date);
         atomic_write(&path, &raw)?;
         Ok(raw)
+    }
+    /// Dates that already have a journal file: the ink visible from the side of the book.
+    pub fn written_dates(&self) -> HashSet<NaiveDate> {
+        fs::read_dir(&self.dir)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter_map(|entry| {
+                        let name = entry.file_name().into_string().ok()?;
+                        parse_date(name.strip_suffix(".md")?)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+    /// Optional `words.txt` beside the journals: one line per day, replacing the built-in words.
+    pub fn words(&self) -> Vec<String> {
+        fs::read_to_string(self.dir.join("words.txt"))
+            .map(|text| {
+                text.lines()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty())
+                    .map(String::from)
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 }
 
@@ -150,6 +177,19 @@ mod tests {
         let raw = "## TODO\n\n## Schedule\n\n## Free Memo\nold notes\n";
         fs::write(store.path(date), raw).unwrap();
         let (j, expected) = store.load(date).unwrap();
+        assert!(store.written_dates().contains(&date));
+        assert!(!store.written_dates().contains(&date.succ_opt().unwrap()));
+        assert!(store.words().is_empty());
+        fs::write(
+            dir.join("words.txt"),
+            "
+  one 
+
+two
+",
+        )
+        .unwrap();
+        assert_eq!(store.words(), ["one", "two"]);
         store.save(date, &j, &expected).unwrap();
         assert_eq!(
             fs::read_to_string(store.path(date).with_extension("md.alpha.bak")).unwrap(),

@@ -43,20 +43,22 @@ pub fn parse_date(value: &str) -> Option<NaiveDate> {
 /// Reference new moon 2000-01-06 18:14 UTC and 29.530588 days, NASA:
 /// https://eclipse.gsfc.nasa.gov/phase/phases1901.html
 /// Sample the selected Gregorian date at 12:00 UTC on every platform.
-pub fn moon(date: NaiveDate) -> (&'static str, &'static str) {
+/// Named in words: terminals cannot be given a moon glyph that renders the same
+/// everywhere, so the page says the phase rather than drawing it.
+pub fn moon(date: NaiveDate) -> &'static str {
     let reference = NaiveDate::from_ymd_opt(2000, 1, 6).unwrap();
     let days = (date - reference).num_days() as f64 + (12.0 - 18.0 - 14.0 / 60.0) / 24.0;
     let phase = days.rem_euclid(29.530588) / 29.530588;
     let index = ((phase * 8.0 + 0.5).floor() as usize) % 8;
     [
-        ("●", "New moon"),
-        ("◔", "Waxing crescent"),
-        ("◐", "First quarter"),
-        ("◕", "Waxing gibbous"),
-        ("○", "Full moon"),
-        ("◕", "Waning gibbous"),
-        ("◑", "Last quarter"),
-        ("◔", "Waning crescent"),
+        "New moon",
+        "Waxing crescent",
+        "First quarter",
+        "Waxing gibbous",
+        "Full moon",
+        "Waning gibbous",
+        "Last quarter",
+        "Waning crescent",
     ][index]
 }
 
@@ -83,7 +85,7 @@ mod tests {
             (21, "Full moon"),
             (28, "Last quarter"),
         ] {
-            assert_eq!(moon(NaiveDate::from_ymd_opt(2000, 1, day).unwrap()).1, name);
+            assert_eq!(moon(NaiveDate::from_ymd_opt(2000, 1, day).unwrap()), name);
         }
     }
 
@@ -96,7 +98,7 @@ mod tests {
             (18, "First quarter"),
             (26, "Full moon"),
         ] {
-            assert_eq!(moon(NaiveDate::from_ymd_opt(2026, 9, day).unwrap()).1, name);
+            assert_eq!(moon(NaiveDate::from_ymd_opt(2026, 9, day).unwrap()), name);
         }
     }
 }

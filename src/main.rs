@@ -2,8 +2,11 @@ mod app;
 mod calendar;
 mod editor;
 mod journal;
+mod schedule;
 mod storage;
+mod theme;
 mod ui;
+mod words;
 
 use chrono::Local;
 use crossterm::{
@@ -45,7 +48,7 @@ fn main() -> io::Result<()> {
         match arg.as_str() {
             "--help" | "-h" => {
                 println!(
-                    "techō — a little space for your day\n\nUsage: techo [--data-dir PATH] [--date YYYY-MM-DD] [--no-mouse]\n\n--data-dir PATH   Journal directory (overrides TECHO_DIR)\n--date DATE       Open a date instead of today\n--no-mouse        Keep terminal mouse selection behavior\n--version        Show version\n\nDefault files: $XDG_DATA_HOME/techo/journals or ~/.local/share/techo/journals\nWindows: %LOCALAPPDATA%/techo/journals\n\nInside: s Schedule, t Todo, f Memo, y Year, g Date, ? Help.\nEditor: Ctrl+S saves, Esc cancels. SSH users can also use mouse.\nFor existing checkout journals: techo --data-dir ./logs"
+                    "techō — a little space for your day\n\nUsage: techo [--data-dir PATH] [--date YYYY-MM-DD] [--no-mouse]\n\n--data-dir PATH   Journal directory (overrides TECHO_DIR)\n--date DATE       Open a date instead of today\n--no-mouse        Keep terminal mouse selection behavior\n--version        Show version\n\nDefault files: $XDG_DATA_HOME/techo/journals or ~/.local/share/techo/journals\nWindows: %LOCALAPPDATA%/techo/journals\n\nInside: s schedule, t todo, f free memo, y year, g date, ? help.\nEditor: Ctrl+S saves, Esc cancels. Mouse works over SSH too.\nA words.txt in the journal directory replaces the daily words.\nFor existing checkout journals: techo --data-dir ./logs"
                 );
                 return Ok(());
             }
@@ -95,7 +98,8 @@ fn main() -> io::Result<()> {
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
     while !app.quit {
         terminal.draw(|frame| ui::draw(frame, &mut app))?;
-        if event::poll(Duration::from_millis(250))? {
+        let wait = if app.turning() { 30 } else { 250 };
+        if event::poll(Duration::from_millis(wait))? {
             app.event(event::read()?);
         }
     }
