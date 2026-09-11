@@ -19,5 +19,8 @@ jobs:
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
       - run: cargo build --locked
-      - if: runner.os != 'Windows'
+      # macOS runs the build and tests above; the scripted-PTY smoke test is
+      # unreliable against the macOS runner's pseudo-terminal, so it runs on
+      # Linux, the platform it was written for.
+      - if: runner.os == 'Linux'
         run: python3 scripts/terminal_smoke.py target/debug/techo

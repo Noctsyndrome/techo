@@ -124,9 +124,7 @@ class Session:
 
     def send(self, value):
         os.write(self.master, value.encode() if isinstance(value, str) else value)
-        # A lone Esc followed too soon by another byte reads as Alt+key on a slow
-        # machine, so give the app time to take it on its own.
-        self.pump(0.6 if value == "\x1b" else 0.2)
+        self.pump()
         assert self.process.poll() is None, self.screen.text
 
     def paste(self, value): self.send("\x1b[200~" + value + "\x1b[201~")
@@ -146,23 +144,7 @@ class Session:
 
     def quit(self):
         os.write(self.master, b"q")
-        try:
-            code = self.process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            # Tell a lost keystroke from a hung process before giving up.
-            state = subprocess.run(["ps", "-o", "pid,stat,command", "-p", str(self.process.pid)],
-                                   capture_output=True, text=True).stdout
-            self.pump(0.3)
-            screen = self.screen.text
-            os.write(self.master, b"q")
-            try:
-                self.process.wait(timeout=3)
-                outcome = "it quit on a second q"
-            except subprocess.TimeoutExpired:
-                outcome = "it is still running after a second q"
-            raise AssertionError(
-                f"techo did not quit on q; {outcome}.\nprocess:\n{state}\nscreen was:\n{screen}") from None
-        assert code == 0, f"techo exited with {code}"
+        assert self.process.wait(timeout=5) == 0
         restored = termios.tcgetattr(self.slave)
         mask = termios.ICANON | termios.ECHO | termios.ISIG
         assert restored[3] & mask == self.before[3] & mask, "terminal mode was not restored"
