@@ -32,12 +32,12 @@ class Screen:
         self.pending += self.decoder.decode(raw)
         while self.pending:
             if self.pending.startswith("\x1b["):
-                match = re.match(r"\x1b\[([0-9;?:]*)([@-~])", self.pending)
+                match = re.match(r"\x1b\[([0-9;?:<>=]*)([@-~])", self.pending)
                 if not match:
                     return
                 params, code = match.groups()
                 self.pending = self.pending[match.end():]
-                if params.startswith("?"):
+                if params.startswith(("?", "<", ">", "=")):
                     continue
                 nums = [int(v or 0) for v in params.split(";")] if ":" not in params else [0]
                 n = nums[0] or 1
@@ -108,10 +108,10 @@ class Session:
                                         stdin=self.slave, stdout=self.slave, stderr=self.slave,
                                         env=env, preexec_fn=setup)
         self.pump(0.8)
-        # An empty journal directory opens on the key reference; any key closes it.
-        if "s schedule   t todo" in self.screen.text:
+        # An empty journal directory opens on the key reference; Esc closes it.
+        if "techō · keys" in self.screen.text:
             self.send("\x1b")
-            assert "s schedule   t todo" not in self.screen.text, self.screen.text
+            assert "techō · keys" not in self.screen.text, self.screen.text
         self.expect("free memo")
 
     def pump(self, duration=0.2):
@@ -120,6 +120,12 @@ class Session:
             ready, _, _ = select.select([self.master], [], [], max(0, deadline - time.monotonic()))
             if ready:
                 raw = os.read(self.master, 65536)
+                # techo asks whether the kitty keyboard protocol is supported
+                # (CSI ? u, then a primary device attributes query). Answer the
+                # attributes query alone, as a traditional terminal does, so it
+                # neither waits two seconds nor switches to the new encoding.
+                if b"\x1b[c" in raw:
+                    os.write(self.master, b"\x1b[?62;22c")
                 self.screen.feed(raw)
 
     def send(self, value):

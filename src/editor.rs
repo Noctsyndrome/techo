@@ -57,29 +57,30 @@ impl TextEditor {
                 .nth(column)
                 .map_or(line.len(), |(i, _)| i);
     }
+    fn line_start(&self) -> usize {
+        self.text[..self.cursor].rfind('\n').map_or(0, |i| i + 1)
+    }
+    fn line_end(&self) -> usize {
+        self.cursor
+            + self.text[self.cursor..]
+                .find('\n')
+                .unwrap_or(self.text.len() - self.cursor)
+    }
+    /// Movement follows readline: Ctrl+A and Ctrl+E reach the ends of the line on
+    /// every keyboard, including those without Home and End.
     pub fn key(&mut self, key: KeyEvent, multiline: bool) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
             KeyCode::Left => self.cursor = self.previous(),
             KeyCode::Right => self.cursor = self.next(),
             KeyCode::Up => self.vertical(false),
             KeyCode::Down => self.vertical(true),
-            KeyCode::Home => {
-                self.cursor = if key.modifiers.contains(KeyModifiers::CONTROL) {
-                    0
-                } else {
-                    self.text[..self.cursor].rfind('\n').map_or(0, |i| i + 1)
-                }
-            }
-            KeyCode::End => {
-                self.cursor = if key.modifiers.contains(KeyModifiers::CONTROL) {
-                    self.text.len()
-                } else {
-                    self.cursor
-                        + self.text[self.cursor..]
-                            .find('\n')
-                            .unwrap_or(self.text.len() - self.cursor)
-                }
-            }
+            KeyCode::Home if ctrl => self.cursor = 0,
+            KeyCode::End if ctrl => self.cursor = self.text.len(),
+            KeyCode::Home => self.cursor = self.line_start(),
+            KeyCode::End => self.cursor = self.line_end(),
+            KeyCode::Char('a') if ctrl => self.cursor = self.line_start(),
+            KeyCode::Char('e') if ctrl => self.cursor = self.line_end(),
             KeyCode::Backspace => {
                 let previous = self.previous();
                 self.text.drain(previous..self.cursor);
@@ -162,6 +163,27 @@ mod tests {
         assert_eq!(cursor, (0, 3));
         let e = TextEditor::new("中文".into());
         assert_eq!(e.visual(4).1, (0, 1));
+    }
+    #[test]
+    fn ctrl_a_and_ctrl_e_reach_the_ends_of_the_line() {
+        let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+        let mut e = TextEditor::new("first\n中文 line".into());
+        e.key(ctrl('a'), true);
+        assert_eq!(e.cursor, 6);
+        e.key(ctrl('e'), true);
+        assert_eq!(e.cursor, e.text.len());
+        e.key(key(KeyCode::Up), true);
+        e.key(ctrl('a'), true);
+        assert_eq!(e.cursor, 0);
+        e.key(ctrl('e'), true);
+        assert_eq!(e.cursor, 5);
+        // Ctrl+Home and Ctrl+End still cross lines.
+        e.key(KeyEvent::new(KeyCode::End, KeyModifiers::CONTROL), true);
+        assert_eq!(e.cursor, e.text.len());
+        e.key(KeyEvent::new(KeyCode::Home, KeyModifiers::CONTROL), true);
+        assert_eq!(e.cursor, 0);
+        // Neither inserts a letter.
+        assert_eq!(e.text, "first\n中文 line");
     }
     #[test]
     fn paste_normalizes_terminal_controls() {

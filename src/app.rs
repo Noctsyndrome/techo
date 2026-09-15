@@ -81,6 +81,11 @@ pub struct App {
     pub status: String,
     pub status_at: Option<Instant>,
     pub help: bool,
+    /// First line of the key reference shown when it is taller than the terminal.
+    pub help_scroll: usize,
+    /// The terminal reports keys with the kitty protocol: modified Enter and, on a
+    /// Mac, the Command key reach the app. Discovered at start, never assumed.
+    pub enhanced: bool,
     pub delete_pending: bool,
     pub quit: bool,
     pub written: HashSet<NaiveDate>,
@@ -121,6 +126,8 @@ impl App {
             status: String::new(),
             status_at: None,
             help: written.is_empty(),
+            help_scroll: 0,
+            enhanced: false,
             delete_pending: false,
             quit: false,
             written,
@@ -452,6 +459,8 @@ impl App {
                             self.action(action);
                         }
                     }
+                    MouseEventKind::ScrollDown if self.help => self.scroll_help(1),
+                    MouseEventKind::ScrollUp if self.help => self.scroll_help(-1),
                     MouseEventKind::ScrollDown | MouseEventKind::ScrollUp
                         if self.editing.is_none() && !self.help && !self.delete_pending =>
                     {
@@ -474,12 +483,25 @@ impl App {
             _ => {}
         }
     }
+    /// Whether ⌘S is worth mentioning: only on a Mac, and only once the terminal
+    /// has agreed to report the Command key.
+    pub fn command_saves(&self) -> bool {
+        cfg!(target_os = "macos") && self.enhanced
+    }
+    /// The reference is drawn clamped, so scrolling only moves the wish; the page
+    /// settles it against the terminal's height.
+    pub fn scroll_help(&mut self, delta: isize) {
+        self.help_scroll = self.help_scroll.saturating_add_signed(delta);
+    }
     pub fn key(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        // Super is the Command key; it only arrives on a Mac terminal that speaks
+        // the kitty protocol, so it is an extra way to save, never the only one.
+        let sup = key.modifiers.contains(KeyModifiers::SUPER);
         if self.editing.is_some() {
             match key.code {
                 KeyCode::Esc => self.action(Action::Cancel),
-                KeyCode::Char('s') if ctrl => self.commit(),
+                KeyCode::Char('s') if ctrl || sup => self.commit(),
                 KeyCode::Enter if ctrl => self.commit(),
                 KeyCode::Enter if self.editing.as_ref().unwrap().target == EditTarget::Jump => {
                     self.commit()
@@ -508,7 +530,16 @@ impl App {
             return;
         }
         if self.help {
-            self.help = false;
+            match key.code {
+                KeyCode::Down | KeyCode::Char('j') => self.scroll_help(1),
+                KeyCode::Up | KeyCode::Char('k') => self.scroll_help(-1),
+                KeyCode::PageDown => self.scroll_help(10),
+                KeyCode::PageUp => self.scroll_help(-10),
+                _ => {
+                    self.help = false;
+                    self.help_scroll = 0;
+                }
+            }
             return;
         }
         if self.delete_pending {
@@ -529,15 +560,16 @@ impl App {
                 KeyCode::Right => self.calendar = Some(shift_days(date, 1)),
                 KeyCode::Up => self.calendar = Some(shift_days(date, -7)),
                 KeyCode::Down => self.calendar = Some(shift_days(date, 7)),
-                KeyCode::PageUp => {
+                // `,` and `.` page like PgUp/PgDn for keyboards without those keys.
+                KeyCode::PageUp | KeyCode::Char(',') => {
                     self.calendar = Some(shift_months(date, -self.calendar_page_size))
                 }
-                KeyCode::PageDown => {
+                KeyCode::PageDown | KeyCode::Char('.') => {
                     self.calendar = Some(shift_months(date, self.calendar_page_size))
                 }
                 KeyCode::Char('[') => self.calendar = Some(shift_months(date, -12)),
                 KeyCode::Char(']') => self.calendar = Some(shift_months(date, 12)),
-                KeyCode::Char('t') | KeyCode::Home => {
+                KeyCode::Char('t' | 'T') | KeyCode::Home => {
                     self.calendar = Some(Local::now().date_naive())
                 }
                 KeyCode::Char('g') => self.start_jump(),
@@ -571,8 +603,9 @@ impl App {
             KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
             KeyCode::Down | KeyCode::Char('j') if self.at_end() => self.append(),
             KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
-            KeyCode::PageUp => self.move_selection(-10),
-            KeyCode::PageDown => self.move_selection(10),
+            // `J` and `K` leap like PgDn/PgUp for keyboards without those keys.
+            KeyCode::PageUp | KeyCode::Char('K') => self.move_selection(-10),
+            KeyCode::PageDown | KeyCode::Char('J') => self.move_selection(10),
             KeyCode::Char(' ') if self.focus == Focus::Todo && !self.journal.tasks.is_empty() => {
                 let mut journal = self.journal.clone();
                 journal.tasks[self.selected_task].done = !journal.tasks[self.selected_task].done;
@@ -583,7 +616,8 @@ impl App {
             KeyCode::Char('g') => self.start_jump(),
             KeyCode::Char('[') => self.open_date(shift_days(self.date, -1)),
             KeyCode::Char(']') => self.open_date(shift_days(self.date, 1)),
-            KeyCode::Home => self.open_date(Local::now().date_naive()),
+            // `T` opens today, as `t` does in the year; lower-case t is the todo panel.
+            KeyCode::Home | KeyCode::Char('T') => self.open_date(Local::now().date_naive()),
             KeyCode::Char('?') | KeyCode::F(1) => self.help = true,
             _ => {}
         }
@@ -625,6 +659,72 @@ mod tests {
     fn first_launch_shows_help_once() {
         let a = App::open(test_dir(), parse_date("2026-09-11").unwrap()).unwrap();
         assert!(a.help);
+        assert_eq!(a.focus, Focus::Schedule);
+        cleanup(a);
+    }
+    #[test]
+    fn the_command_key_saves_when_the_terminal_reports_it() {
+        let mut a = app();
+        a.focus = Focus::Todo;
+        a.start_edit(true);
+        a.editing.as_mut().unwrap().text.insert("call");
+        a.key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::SUPER));
+        assert!(a.editing.is_none());
+        assert_eq!(a.journal.tasks[0].text, "call");
+        // Plain s while writing is a letter, and Ctrl+S still saves.
+        a.start_edit(true);
+        a.key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+        assert_eq!(a.editing.as_ref().unwrap().text.text, "s");
+        a.key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        assert!(a.editing.is_none());
+        assert!(!a.command_saves() || cfg!(target_os = "macos"));
+        cleanup(a);
+    }
+    #[test]
+    fn letters_stand_in_for_home_and_the_page_keys() {
+        let mut a = app();
+        for i in 0..15 {
+            a.journal.tasks.push(Task {
+                done: false,
+                text: format!("task {i}"),
+            });
+        }
+        a.focus = Focus::Todo;
+        a.key(KeyEvent::new(KeyCode::Char('J'), KeyModifiers::SHIFT));
+        assert_eq!(a.selected_task, 10);
+        a.key(KeyEvent::new(KeyCode::Char('K'), KeyModifiers::SHIFT));
+        assert_eq!(a.selected_task, 0);
+        // Lower-case t is still the todo panel; T is today.
+        a.open_date(parse_date("2024-02-29").unwrap());
+        a.key(KeyEvent::new(KeyCode::Char('T'), KeyModifiers::SHIFT));
+        assert_eq!(a.date, Local::now().date_naive());
+        // In the year, `,` and `.` page the months like PgUp and PgDn.
+        a.calendar = Some(parse_date("2026-09-11").unwrap());
+        a.calendar_page_size = 4;
+        a.key(KeyEvent::new(KeyCode::Char('.'), KeyModifiers::NONE));
+        assert_eq!(a.calendar, parse_date("2027-01-11"));
+        a.key(KeyEvent::new(KeyCode::Char(','), KeyModifiers::NONE));
+        assert_eq!(a.calendar, parse_date("2026-09-11"));
+        a.key(KeyEvent::new(KeyCode::Char('T'), KeyModifiers::SHIFT));
+        assert_eq!(a.calendar, Some(Local::now().date_naive()));
+        cleanup(a);
+    }
+    #[test]
+    fn the_key_reference_scrolls_and_closes() {
+        let mut a = app();
+        a.key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+        assert!(a.help);
+        a.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        a.key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        a.key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        assert!(a.help);
+        assert_eq!(a.help_scroll, 12);
+        a.key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(a.help_scroll, 11);
+        a.key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert!(!a.help);
+        assert_eq!(a.help_scroll, 0);
+        // Whatever closed it did nothing else: focus and page unchanged.
         assert_eq!(a.focus, Focus::Schedule);
         cleanup(a);
     }
@@ -697,7 +797,9 @@ mod tests {
     }
     #[test]
     fn down_past_the_end_starts_a_new_item() {
-        let mut a = app();
+        // On today's page, whatever day that is: the new item takes the time now.
+        let mut a = App::open(test_dir(), Local::now().date_naive()).unwrap();
+        a.help = false;
         let down = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
         a.focus = Focus::Todo;
         a.key(down);

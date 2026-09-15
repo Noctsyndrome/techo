@@ -468,16 +468,13 @@ fn draw_editing_footer(frame: &mut Frame, app: &mut App, area: Rect) -> bool {
     let jump = edit.target == EditTarget::Jump;
     let schedule = matches!(edit.target, EditTarget::Schedule(_));
     let time_active = edit.time_active;
+    let save = if jump { "Enter open" } else { save_label(app) };
     let mut x = button(
         frame,
         &mut app.hits,
         area.x + 1,
         area.y,
-        if jump {
-            "Enter open"
-        } else {
-            "Ctrl+S or Ctrl+Enter save"
-        },
+        save,
         Action::Save,
         area.right(),
     );
@@ -689,7 +686,7 @@ fn draw_year(frame: &mut Frame, app: &mut App) {
     let text = match app.status_line() {
         Some(status) => format!(" {status}"),
         None => format!(
-            " {selected}   arrows move · Enter open · [ ] year · PgUp/PgDn page · t today · Esc back"
+            " {selected}   arrows move · Enter open · [ ] year · , . months · t today · Esc back"
         ),
     };
     put(
@@ -851,40 +848,161 @@ fn draw_text(frame: &mut Frame, edit: &crate::app::Editing, body: Rect) {
     }
 }
 
+/// The key column of the reference; descriptions start after it.
+const KEY_COLUMN: usize = 20;
+/// The reference's width: a key, a gap and a description on one 80-column line.
+const HELP_WIDTH: u16 = 84;
+
+/// What the note's save key is called where the user can see it. The Command
+/// key is only mentioned once the terminal has shown it can deliver it.
+fn save_label(app: &App) -> &'static str {
+    if app.command_saves() {
+        "Ctrl+S or ⌘S save"
+    } else {
+        "Ctrl+S save"
+    }
+}
+
+/// The key reference, grouped the way the page is used: keys on the left, what
+/// they do on the right, and the journal's whereabouts at the end. Every key the
+/// app answers to is here, so this is the one place to look.
+fn help_lines(app: &App) -> Vec<Line<'static>> {
+    let save = if app.command_saves() {
+        "Ctrl+S / ⌘S"
+    } else {
+        "Ctrl+S"
+    };
+    let files = clip(
+        &app.store.dir.display().to_string(),
+        (HELP_WIDTH as usize - 4 - KEY_COLUMN - 2) as u16,
+    );
+    let month = theme::month(app.date);
+    let groups: [(&str, Vec<(&str, String)>); 5] = [
+        (
+            "page",
+            vec![
+                ("s / t / f", "schedule, todo or free memo".into()),
+                ("Tab / Shift+Tab", "next / previous panel".into()),
+                (
+                    "Up / Down, k / j",
+                    "move; Down past the last item starts a new one".into(),
+                ),
+                ("PgUp / PgDn, K / J", "move ten".into()),
+                ("Enter", "write, or edit the item under the cursor".into()),
+                ("n", "new item".into()),
+                ("Space", "check a todo".into()),
+                ("d / Delete", "delete the item under the cursor".into()),
+                ("q / Esc / Ctrl+C", "quit".into()),
+            ],
+        ),
+        (
+            "dates",
+            vec![
+                ("[ / ]", "previous / next day".into()),
+                ("T / Home", "today".into()),
+                ("g", "go to a date, YYYY-MM-DD".into()),
+                ("y", "the year".into()),
+            ],
+        ),
+        (
+            "year",
+            vec![
+                ("arrows", "move a day or a week".into()),
+                ("Enter", "open the day".into()),
+                ("[ / ]", "previous / next year".into()),
+                (", / .  PgUp / PgDn", "page the months".into()),
+                ("t / Home", "today".into()),
+                ("Esc / q", "back to the page".into()),
+            ],
+        ),
+        (
+            "note",
+            vec![
+                (save, "save".into()),
+                ("Esc", "cancel; nothing is kept".into()),
+                ("Enter", "new line".into()),
+                (
+                    "Tab",
+                    "schedule: the time; 9, 930 and 09:30 are read".into(),
+                ),
+                (
+                    "Ctrl+A / Ctrl+E",
+                    "start / end of the line, as Home / End".into(),
+                ),
+                ("Ctrl+Home / Ctrl+End", "start / end of the note".into()),
+            ],
+        ),
+        (
+            "journal",
+            vec![
+                ("files", files),
+                (
+                    "words",
+                    "words.txt beside the journals, one line per day".into(),
+                ),
+                (
+                    "month",
+                    format!(
+                        "{} ({}), printed in {}",
+                        month.name, month.reading, month.colour
+                    ),
+                ),
+            ],
+        ),
+    ];
+    let mut lines = Vec::new();
+    for (i, (name, rows)) in groups.into_iter().enumerate() {
+        if i > 0 {
+            lines.push(Line::default());
+        }
+        lines.push(Line::styled(name, ink().bold()));
+        for (key, what) in rows {
+            lines.push(Line::from(vec![
+                Span::styled(format!("{key:<KEY_COLUMN$}"), Style::default().bold()),
+                Span::raw("  "),
+                Span::raw(what),
+            ]));
+        }
+    }
+    lines
+}
+
+/// The reference in a box on the page, scrolling when the terminal is short.
 fn draw_help(frame: &mut Frame, app: &mut App) {
     app.hits.clear();
-    // Wide enough that no line wraps at 120 columns, tall enough for all of them.
-    let area = popup(frame.area(), 84, 22);
+    let lines = help_lines(app);
+    // Border and footer around the lines; the terminal's height is the limit.
+    let area = popup(frame.area(), HELP_WIDTH, lines.len() as u16 + 3);
     frame.render_widget(Clear, area);
-    let month = theme::month(app.date);
-    let text = format!(
-        "s schedule   t todo   f free memo   Tab switch   or click a panel\n\
-         Up/Down move   Enter write or edit   n new   d delete   Space check a todo\n\
-         Down past the last item starts a new one, at the time now on today's page.\n\
-         schedule: an item's time is the note's title; Tab changes it. 9, 930 or 09:30.\n\
-         Items at the same time gather together. The paper day runs 04:00 to 03:59.\n\
-         \n\
-         [ ] previous / next day   Home today   g go to a date   y the year\n\
-         year: arrows move, Enter opens, [ ] change year, PgUp/PgDn page, Esc back\n\
-         \n\
-         editor: Ctrl+S or Ctrl+Enter saves, Esc cancels, Enter adds a line.\n\
-         moon: an approximate phase for the date. day N counts the days of the year.\n\
-         this month is {} ({}), printed in {}.\n\
-         \n\
-         files: {}\n\
-         words: words.txt beside the journals, one line per day, replaces the built-in.\n\
-         \n\
-         ? or F1 shows this again. Any key closes it.",
-        month.name,
-        month.reading,
-        month.colour,
-        app.store.dir.display()
+    let border = block("techō · keys", false);
+    let inner = border.inner(area);
+    frame.render_widget(border, area);
+    if inner.height < 2 {
+        return;
+    }
+    let rows = inner.height as usize - 1;
+    let total = lines.len();
+    app.help_scroll = app.help_scroll.min(total.saturating_sub(rows));
+    let body = Rect::new(inner.x, inner.y, inner.width, rows as u16);
+    put(
+        frame,
+        body,
+        lines
+            .into_iter()
+            .skip(app.help_scroll)
+            .take(rows)
+            .collect::<Vec<_>>(),
     );
-    frame.render_widget(
-        Paragraph::new(text)
-            .wrap(Wrap { trim: false })
-            .block(block("techō", false)),
-        area,
+    let footer = Rect::new(inner.x, inner.bottom() - 1, inner.width, 1);
+    let text = if total > rows {
+        "↑↓ scroll · Esc or any other key closes · ? or F1 opens this again"
+    } else {
+        "Esc or any key closes · ? or F1 opens this again"
+    };
+    put(
+        frame,
+        footer,
+        Line::styled(clip(text, footer.width), muted()),
     );
     app.hits.push((area, Action::Key(KeyCode::Esc)));
 }
@@ -943,6 +1061,17 @@ mod tests {
             .content
             .iter()
             .map(|c| c.symbol())
+            .collect()
+    }
+    /// The screen one row per line, for checks that care where a line ends.
+    fn rows(terminal: &Terminal<TestBackend>) -> Vec<String> {
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect()
+            })
             .collect()
     }
     #[test]
@@ -1070,8 +1199,51 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
         terminal.draw(|f| draw(f, &mut app)).unwrap();
         let text = screen(&terminal);
-        assert!(text.contains("s schedule   t todo"));
-        assert!(text.contains("Any key closes it."));
+        // A heading is alone on its line inside the box; the page shows around it.
+        let heading = |terminal: &Terminal<TestBackend>, group: &str| {
+            rows(terminal)
+                .iter()
+                .any(|row| row.split('│').any(|part| part.trim() == group))
+        };
+        for group in ["page", "dates", "year", "note", "journal"] {
+            assert!(heading(&terminal, group), "{group} heading missing");
+        }
+        assert!(text.contains("techō · keys"));
+        assert!(text.contains("printed in"), "the last line is on the page");
+        assert!(text.contains("Esc or any key closes"));
+        assert!(!text.contains("scroll"), "everything fits at 120x40");
+        // Keys people can actually press on every keyboard are listed; the
+        // unreliable Ctrl+Enter is not.
+        for key in ["Ctrl+S", "Ctrl+A / Ctrl+E", "T / Home", ", / .", "K / J"] {
+            assert!(text.contains(key), "{key} missing from the reference");
+        }
+        assert!(!text.contains("Ctrl+Enter"));
+        // On a short terminal the reference scrolls down to the same last line.
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let text = screen(&terminal);
+        assert!(text.contains("↑↓ scroll"));
+        assert!(!text.contains("printed in"));
+        app.scroll_help(100);
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let text = screen(&terminal);
+        assert!(text.contains("printed in"));
+        assert!(!heading(&terminal, "page"), "the top scrolled away");
+        let dir = app.store.dir.clone();
+        drop(app);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn the_command_key_is_only_named_once_the_terminal_reports_it() {
+        let mut app = app();
+        app.help = true;
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        assert!(!screen(&terminal).contains("⌘S"));
+        app.enhanced = true;
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        assert_eq!(screen(&terminal).contains("⌘S"), cfg!(target_os = "macos"));
         let dir = app.store.dir.clone();
         drop(app);
         std::fs::remove_dir_all(dir).unwrap();
