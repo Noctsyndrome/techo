@@ -34,6 +34,8 @@ Each day is one `YYYY-MM-DD.md` file, plain Markdown, in `~/.local/share/techo/j
 
 ## Documentation
 
+See the [documentation map](docs/README.md) for reading order, current guides, and development reviews.
+
 - [Guide](docs/guide.md): the page, dates, colours and the small print.
 - [Keys and terminals](docs/keys.md): every key, and what to expect on macOS, over SSH and in a multiplexer.
 - [Files](docs/files.md): where journals live, the Markdown format, and how saving stays safe.
