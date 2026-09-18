@@ -1,6 +1,6 @@
 # Implementation Notes: 键位策略与 mac 适配
 
-起因：在 mac 上试用时，按 Windows/Linux 习惯设计的键位到不了 techo，最基本的保存就有冲突。调研了 nano、micro、helix、vim/neovim、emacs 终端模式和 Textual 框架的做法之后定下本文的策略。本文记录决定和理由；`?` 页面是应用内的集中展示，[keys.md](keys.md) 是面向用户的对照表，改键位时两处一起改。
+起因：在 mac 上试用时，按 Windows/Linux 习惯设计的键位到不了 techo，最基本的保存就有冲突。调研了 nano、micro、helix、vim/neovim、emacs 终端模式和 Textual 框架的做法之后定下本文的策略。本文记录决定和理由；`?` 页面是应用内的集中展示，[keys.md](../keys.md) 是面向用户的对照表，改键位时两处一起改。
 
 ## 决定
 

@@ -1,6 +1,6 @@
 # Implementation Notes: 首个可用版本交互优化
 
-Spec: `interaction-feedback.md`
+Spec: [2026-09-11-interaction-feedback.md](2026-09-11-interaction-feedback.md)
 
 ## Design decisions
 
